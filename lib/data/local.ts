@@ -1,0 +1,190 @@
+// Development data layer: one JSON file under .data/. Same signatures as the Supabase layer.
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { AccessError, type Board, type BoardListItem, type BoardRole, type DataLayer, type User } from "./types";
+
+interface Db {
+  users: User[];
+  teams: { id: string; name: string; createdBy: string }[];
+  teamMembers: { teamId: string; userId: string; role: "owner" | "admin" | "member" }[];
+  boards: Board[];
+  boardMembers: { boardId: string; userId: string; role: BoardRole; starred: boolean; lastOpenedAt: string | null }[];
+}
+
+const DATA_DIR = process.env.DATA_DIR ?? path.join(process.cwd(), ".data");
+const FILE = path.join(DATA_DIR, "db.json");
+const empty = (): Db => ({ users: [], teams: [], teamMembers: [], boards: [], boardMembers: [] });
+
+// Serialise every read-modify-write so concurrent requests cannot lose updates.
+let queue: Promise<unknown> = Promise.resolve();
+function tx<T>(fn: (db: Db) => T | Promise<T>, write = true): Promise<T> {
+  const run = async () => {
+    let db: Db;
+    try {
+      db = JSON.parse(await fs.readFile(FILE, "utf8"));
+    } catch {
+      db = empty();
+    }
+    const result = await fn(db);
+    if (write) {
+      await fs.mkdir(DATA_DIR, { recursive: true });
+      const tmp = `${FILE}.${process.pid}.tmp`;
+      await fs.writeFile(tmp, JSON.stringify(db, null, 2));
+      await fs.rename(tmp, FILE);
+    }
+    return result;
+  };
+  const p = queue.then(run, run);
+  queue = p.catch(() => undefined);
+  return p;
+}
+
+// Board content is saved by the realtime server; its file time is the board's "last modified".
+async function docModifiedTimes(): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const dir = path.join(DATA_DIR, "docs");
+  let names: string[] = [];
+  try {
+    names = await fs.readdir(dir);
+  } catch {
+    return out;
+  }
+  await Promise.all(
+    names
+      .filter((n) => n.endsWith(".bin"))
+      .map(async (n) => {
+        const st = await fs.stat(path.join(dir, n));
+        out.set(n.slice(0, -4), st.mtime.toISOString());
+      }),
+  );
+  return out;
+}
+const latest = (a: string, b?: string) => (b && b > a ? b : a);
+
+const now = () => new Date().toISOString();
+const canManage = (r: BoardRole | null) => r === "owner" || r === "coowner";
+
+function roleOf(db: Db, boardId: string, userId: string): BoardRole | null {
+  return db.boardMembers.find((m) => m.boardId === boardId && m.userId === userId)?.role ?? null;
+}
+
+export const localData: DataLayer = {
+  upsertUserByEmail: (email, name) =>
+    tx((db) => {
+      const key = email.trim().toLowerCase();
+      let user = db.users.find((u) => u.email === key);
+      if (!user) {
+        user = { id: randomUUID(), email: key, name: name.trim() || key.split("@")[0] };
+        db.users.push(user);
+        const teamId = randomUUID();
+        db.teams.push({ id: teamId, name: `${user.name}'s team`, createdBy: user.id });
+        db.teamMembers.push({ teamId, userId: user.id, role: "owner" });
+      } else if (name.trim()) {
+        user.name = name.trim();
+      }
+      return user;
+    }),
+
+  getUser: (id) => tx((db) => db.users.find((u) => u.id === id) ?? null, false),
+
+  listBoards: async (userId, opts = {}) => {
+    const docTimes = await docModifiedTimes();
+    return tx((db) => {
+      const q = opts.q?.trim().toLowerCase();
+      const rows: BoardListItem[] = [];
+      for (const m of db.boardMembers) {
+        if (m.userId !== userId) continue;
+        const b = db.boards.find((x) => x.id === m.boardId);
+        if (!b) continue;
+        if (Boolean(opts.trashed) !== Boolean(b.deletedAt)) continue;
+        if (opts.starredOnly && !m.starred) continue;
+        if (q && !b.name.toLowerCase().includes(q)) continue;
+        rows.push({ ...b, updatedAt: latest(b.updatedAt, docTimes.get(b.id)), role: m.role, starred: m.starred, lastOpenedAt: m.lastOpenedAt });
+      }
+      const sort = opts.sort ?? "opened";
+      rows.sort((a, b) =>
+        sort === "name"
+          ? a.name.localeCompare(b.name)
+          : sort === "modified"
+            ? b.updatedAt.localeCompare(a.updatedAt)
+            : (b.lastOpenedAt ?? b.createdAt).localeCompare(a.lastOpenedAt ?? a.createdAt),
+      );
+      return rows;
+    }, false);
+  },
+
+  createBoard: (userId, name) =>
+    tx((db) => {
+      const team = db.teamMembers.find((t) => t.userId === userId);
+      if (!team) throw new AccessError("No team for this user");
+      const ts = now();
+      const board: Board = {
+        id: randomUUID(),
+        teamId: team.teamId,
+        ownerId: userId,
+        name: (name ?? "").trim().slice(0, 60) || "Untitled",
+        description: "",
+        linkAccess: "private",
+        createdAt: ts,
+        updatedAt: ts,
+        deletedAt: null,
+      };
+      db.boards.push(board);
+      db.boardMembers.push({ boardId: board.id, userId, role: "owner", starred: false, lastOpenedAt: ts });
+      return board;
+    }),
+
+  getBoard: (boardId) => tx((db) => db.boards.find((b) => b.id === boardId) ?? null, false),
+
+  getRole: (boardId, userId) =>
+    tx((db) => {
+      const b = db.boards.find((x) => x.id === boardId);
+      if (!b || b.deletedAt) return null;
+      return roleOf(db, boardId, userId);
+    }, false),
+
+  renameBoard: (userId, boardId, name) =>
+    tx((db) => {
+      const b = db.boards.find((x) => x.id === boardId);
+      if (!b || !canManage(roleOf(db, boardId, userId))) throw new AccessError();
+      const clean = name.trim().slice(0, 60);
+      if (!clean) throw new Error("Board name cannot be empty");
+      b.name = clean;
+      b.updatedAt = now();
+      return b;
+    }),
+
+  setStarred: (userId, boardId, starred) =>
+    tx((db) => {
+      const m = db.boardMembers.find((x) => x.boardId === boardId && x.userId === userId);
+      if (!m) throw new AccessError();
+      m.starred = starred;
+    }),
+
+  markOpened: (userId, boardId) =>
+    tx((db) => {
+      const m = db.boardMembers.find((x) => x.boardId === boardId && x.userId === userId);
+      if (m) m.lastOpenedAt = now();
+    }),
+
+  trashBoard: (userId, boardId) =>
+    tx((db) => {
+      const b = db.boards.find((x) => x.id === boardId);
+      if (!b || roleOf(db, boardId, userId) !== "owner") throw new AccessError();
+      b.deletedAt = now();
+    }),
+
+  restoreBoard: (userId, boardId) =>
+    tx((db) => {
+      const b = db.boards.find((x) => x.id === boardId);
+      if (!b || roleOf(db, boardId, userId) !== "owner") throw new AccessError();
+      b.deletedAt = null;
+    }),
+
+  touchBoard: (boardId) =>
+    tx((db) => {
+      const b = db.boards.find((x) => x.id === boardId);
+      if (b) b.updatedAt = now();
+    }),
+};
