@@ -11,7 +11,9 @@
     "start": "concurrently -k -n web,rt \"next start -p 3000\" \"tsx server/realtime.ts\"",
     "typecheck": "tsc --noEmit",
     "test:unit": "tsx --test lib/**/*.test.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "db:migrate:dev": "tsx scripts/migrate.ts --dev-stub"
   },
   "dependencies": {
     "@hocuspocus/extension-database": "^4.7.0",
@@ -21,6 +23,7 @@
     "lucide-react": "^1.52.0",
     "nanoid": "^5.1.0",
     "next": "^16.3.8",
+    "postgres": "^3.4.9",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-konva": "^19.3.0",

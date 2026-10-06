@@ -1,7 +1,8 @@
 import { localData } from "./local";
+import { postgresData } from "./postgres";
 import type { DataLayer } from "./types";
 
 export * from "./types";
 
-// The Supabase implementation arrives in the replica-backend stage; DATA_LAYER=supabase will select it.
-export const data: DataLayer = localData;
+// DATA_LAYER=postgres uses DATABASE_URL (Supabase in production); anything else uses the local JSON file.
+export const data: DataLayer = process.env.DATA_LAYER === "postgres" ? postgresData : localData;
