@@ -9,7 +9,7 @@ const id = z.string().uuid();
 
 export async function createBoard() {
   const user = await requireUser();
-  const board = await data.createBoard(user.id);
+  const board = await data.createBoard(user.id, "Без названия");
   redirect(`/board/${board.id}`);
 }
 
