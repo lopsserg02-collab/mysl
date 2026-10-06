@@ -15,6 +15,7 @@ export interface StickyItem {
   z: number;
   color: string;
   text: string;
+  locked?: boolean;
   createdBy: string;
   updatedAt: number;
 }
