@@ -39,6 +39,26 @@ export interface Person {
   pending: boolean;
 }
 
+export interface Comment {
+  id: string;
+  authorId: string;
+  authorName: string;
+  body: string;
+  createdAt: string;
+}
+
+/** A comment pin. With itemId, x/y are relative to that item's top-left and the pin moves with it. */
+export interface CommentThread {
+  id: string;
+  itemId: string | null;
+  x: number;
+  y: number;
+  resolved: boolean;
+  createdBy: string;
+  createdAt: string;
+  comments: Comment[];
+}
+
 export type BoardSort = "opened" | "modified" | "name";
 
 export interface DataLayer {
@@ -62,7 +82,16 @@ export interface DataLayer {
   setLinkAccess(userId: string, boardId: string, access: LinkAccess): Promise<void>;
   /** A signed-in person opening a board shared by link joins it with the link's role. */
   joinViaLink(userId: string, boardId: string): Promise<BoardRole | null>;
+  // Comments (S09): anyone on the board reads them; commenters and up write. Mentions notify people on the board.
+  listThreads(userId: string, boardId: string): Promise<CommentThread[]>;
+  createThread(userId: string, boardId: string, at: { x: number; y: number; itemId?: string | null }, body: string, mentions?: string[]): Promise<CommentThread>;
+  replyToThread(userId: string, threadId: string, body: string, mentions?: string[]): Promise<Comment>;
+  setThreadResolved(userId: string, threadId: string, resolved: boolean): Promise<void>;
+  /** How many unread mentions the user has, for the dashboard. */
+  unreadMentions(userId: string): Promise<number>;
 }
+
+export const canComment = (r: BoardRole | null) => r === "owner" || r === "coowner" || r === "editor" || r === "commenter";
 
 export const SHARE_ROLES: ShareRole[] = ["editor", "commenter", "viewer"];
 export const linkRole = (a: LinkAccess): ShareRole | null => (a === "edit" ? "editor" : a === "comment" ? "commenter" : a === "view" ? "viewer" : null);

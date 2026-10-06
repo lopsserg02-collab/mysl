@@ -73,6 +73,11 @@ const server = new Server<RealtimeClaims>({
     connectionConfig.readOnly = !["owner", "coowner", "editor"].includes(claims.role);
     return claims;
   },
+  // "comments" means someone changed a comment thread: tell everyone else on the board to fetch again.
+  // The signal carries no data, so read-only viewers learn nothing they could not fetch themselves.
+  async onStateless({ payload, document, connection }) {
+    if (payload === "comments") document.broadcastStateless("comments", (c) => c !== connection);
+  },
   extensions: [new Database(process.env.DATA_LAYER === "postgres" ? postgresStore() : fileStore())],
 });
 

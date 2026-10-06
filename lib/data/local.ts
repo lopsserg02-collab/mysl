@@ -2,7 +2,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { AccessError, SHARE_ROLES, linkRole, type Board, type BoardListItem, type BoardRole, type DataLayer, type Person, type ShareRole, type User } from "./types";
+import { AccessError, SHARE_ROLES, canComment, linkRole, type Board, type BoardListItem, type BoardRole, type Comment, type CommentThread, type DataLayer, type Person, type ShareRole, type User } from "./types";
 
 interface Db {
   users: User[];
@@ -11,6 +11,9 @@ interface Db {
   boards: Board[];
   boardMembers: { boardId: string; userId: string; role: BoardRole; starred: boolean; lastOpenedAt: string | null }[];
   invites?: { boardId: string; email: string; role: ShareRole; invitedBy: string; acceptedAt: string | null }[];
+  threads?: { id: string; boardId: string; itemId: string | null; x: number; y: number; resolvedAt: string | null; createdBy: string; createdAt: string }[];
+  comments?: { id: string; threadId: string; authorId: string; body: string; createdAt: string }[];
+  notifications?: { id: string; userId: string; kind: "mention"; boardId: string; commentId: string; actorId: string; readAt: string | null; createdAt: string }[];
 }
 
 const DATA_DIR = process.env.DATA_DIR ?? path.join(process.cwd(), ".data");
@@ -77,6 +80,35 @@ function checkRole(role: ShareRole | null) {
 }
 
 const ROLE_ORDER: BoardRole[] = ["owner", "coowner", "editor", "commenter", "viewer"];
+
+function cleanBody(body: string) {
+  const clean = body.trim();
+  if (!clean || clean.length > 5000) throw new Error("Comment must be 1 to 5000 characters");
+  return clean;
+}
+
+function addComment(db: Db, boardId: string, threadId: string, userId: string, body: string, mentions: string[]): Comment {
+  const c = { id: randomUUID(), threadId, authorId: userId, body: cleanBody(body), createdAt: now() };
+  (db.comments ??= []).push(c);
+  for (const u of new Set(mentions)) {
+    if (u === userId || !roleOf(db, boardId, u)) continue;
+    (db.notifications ??= []).push({ id: randomUUID(), userId: u, kind: "mention", boardId, commentId: c.id, actorId: userId, readAt: null, createdAt: c.createdAt });
+  }
+  return toComment(db, c);
+}
+
+const toComment = (db: Db, c: NonNullable<Db["comments"]>[number]): Comment => ({
+  id: c.id,
+  authorId: c.authorId,
+  authorName: db.users.find((u) => u.id === c.authorId)?.name ?? "",
+  body: c.body,
+  createdAt: c.createdAt,
+});
+
+function liveRole(db: Db, boardId: string, userId: string) {
+  const b = db.boards.find((x) => x.id === boardId);
+  return b && !b.deletedAt ? roleOf(db, boardId, userId) : null;
+}
 
 function roleOf(db: Db, boardId: string, userId: string): BoardRole | null {
   return db.boardMembers.find((m) => m.boardId === boardId && m.userId === userId)?.role ?? null;
@@ -276,4 +308,49 @@ export const localData: DataLayer = {
       db.boardMembers.push({ boardId, userId, role: via, starred: false, lastOpenedAt: null });
       return via;
     }),
+
+  listThreads: (userId, boardId) =>
+    tx((db) => {
+      if (!liveRole(db, boardId, userId)) throw new AccessError();
+      return (db.threads ?? [])
+        .filter((t) => t.boardId === boardId)
+        .map(
+          (t): CommentThread => ({
+            id: t.id,
+            itemId: t.itemId,
+            x: t.x,
+            y: t.y,
+            resolved: Boolean(t.resolvedAt),
+            createdBy: t.createdBy,
+            createdAt: t.createdAt,
+            comments: (db.comments ?? []).filter((c) => c.threadId === t.id).map((c) => toComment(db, c)),
+          }),
+        );
+    }, false),
+
+  createThread: (userId, boardId, at, body, mentions = []) =>
+    tx((db) => {
+      if (!canComment(liveRole(db, boardId, userId))) throw new AccessError();
+      const t = { id: randomUUID(), boardId, itemId: at.itemId ?? null, x: at.x, y: at.y, resolvedAt: null, createdBy: userId, createdAt: now() };
+      cleanBody(body);
+      (db.threads ??= []).push(t);
+      const c = addComment(db, boardId, t.id, userId, body, mentions);
+      return { id: t.id, itemId: t.itemId, x: t.x, y: t.y, resolved: false, createdBy: userId, createdAt: t.createdAt, comments: [c] };
+    }),
+
+  replyToThread: (userId, threadId, body, mentions = []) =>
+    tx((db) => {
+      const t = (db.threads ?? []).find((x) => x.id === threadId);
+      if (!t || !canComment(liveRole(db, t.boardId, userId))) throw new AccessError();
+      return addComment(db, t.boardId, t.id, userId, body, mentions);
+    }),
+
+  setThreadResolved: (userId, threadId, resolved) =>
+    tx((db) => {
+      const t = (db.threads ?? []).find((x) => x.id === threadId);
+      if (!t || !canComment(liveRole(db, t.boardId, userId))) throw new AccessError();
+      t.resolvedAt = resolved ? now() : null;
+    }),
+
+  unreadMentions: (userId) => tx((db) => (db.notifications ?? []).filter((n) => n.userId === userId && !n.readAt).length, false),
 };

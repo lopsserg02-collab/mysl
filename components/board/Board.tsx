@@ -5,9 +5,9 @@ import { Stage, Layer, Rect, Line, Arrow, Ellipse, Transformer } from "react-kon
 import type Konva from "konva";
 import {
   ArrowLeft, Hand, MousePointer2, StickyNote, Type, Square, Circle, Triangle, Diamond, RectangleHorizontal, MoveUpRight, Pen, Highlighter, Eraser, Frame,
-  Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Copy, Trash2, BringToFront, SendToBack, WifiOff, Lock, Unlock, CornerDownRight, ArrowRight, Share2,
+  Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Copy, Trash2, BringToFront, SendToBack, WifiOff, Lock, Unlock, CornerDownRight, ArrowRight, Share2, MessageCircle,
 } from "lucide-react";
-import type { BoardRole, LinkAccess } from "@/lib/data/types";
+import { canComment, type BoardRole, type LinkAccess } from "@/lib/data/types";
 import { t } from "@/lib/copy";
 import {
   addItem, addSticky, boxOf, bringToFront, deleteItems, duplicateItems, hasText, itemsInside, sendToBack, simplify, updateItems, bboxOfPoints,
@@ -19,9 +19,10 @@ import { useBoardDoc } from "./useBoardDoc";
 import { bounds, fitTo, intersects, stepZoom, toBoard, zoomAt, type Viewport } from "./viewport";
 import { ItemView } from "./ItemView";
 import { ShareDialog } from "./ShareDialog";
+import { Comments, type CommentDraft } from "./Comments";
 import { FONT, PAD, autoTextWidth, fittedFontSize, textHeight } from "./text";
 
-type Tool = "select" | "hand" | "sticky" | "text" | "shape" | "connector" | "pen" | "highlighter" | "eraser" | "frame";
+type Tool = "select" | "hand" | "sticky" | "text" | "shape" | "connector" | "pen" | "highlighter" | "eraser" | "frame" | "comment";
 type Pt = { x: number; y: number };
 const FONT_SIZES = [14, 20, 32, 48];
 const SHAPE_ICONS: Record<ShapeKind, typeof Square> = { rect: Square, round: RectangleHorizontal, ellipse: Circle, triangle: Triangle, diamond: Diamond };
@@ -39,6 +40,8 @@ const rectFrom = (a: Pt, b: Pt): Box => ({ x: Math.min(a.x, b.x), y: Math.min(a.
 
 export function Board({ board, role, user }: { board: { id: string; name: string; linkAccess: LinkAccess }; role: BoardRole; user: { id: string; name: string } }) {
   const [shareOpen, setShareOpen] = useState(false);
+  const [commentDraft, setCommentDraft] = useState<CommentDraft | null>(null);
+  const mayComment = canComment(role);
   const canEdit = role === "owner" || role === "coowner" || role === "editor";
   const canRename = role === "owner" || role === "coowner";
   const { doc, provider, items, status, peers, undo, ready } = useBoardDoc(board.id, user);
@@ -59,6 +62,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
   const fitted = useRef(false);
   // A new item opens its editor on pointer-up, so the click that made it does not steal focus.
   const pendingEdit = useRef<string | null>(null);
+  const pendingComment = useRef<CommentDraft | null>(null); // opened on pointer-up so the canvas does not take focus back
   // Konva reports a double click for any two quick clicks; only count ones in the same spot.
   const lastDown = useRef({ x: 0, y: 0, prev: { x: -999, y: -999 } });
   const cursorFrame = useRef(0);
@@ -190,6 +194,10 @@ export function Board({ board, role, user }: { board: { id: string; name: string
         if (canEdit || tools[k] === "select" || tools[k] === "hand") setTool(tools[k]);
         return;
       }
+      if (k === "c") {
+        if (mayComment) setTool("comment");
+        return;
+      }
       switch (e.key) {
         case "f":
         case "F":
@@ -282,6 +290,14 @@ export function Board({ board, role, user }: { board: { id: string; name: string
       return;
     }
     const b = toBoard(vp, p);
+    if (tool === "comment") {
+      // A pin on an item sticks to it; elsewhere it stays where it was dropped.
+      const id = itemAt(e.target);
+      const on = id ? byId.get(id) : undefined;
+      pendingComment.current = on && on.type !== "connector" ? { x: b.x - on.x, y: b.y - on.y, itemId: on.id } : { x: b.x, y: b.y, itemId: null };
+      setTool("select");
+      return;
+    }
     if (canEdit) {
       switch (tool) {
         case "sticky":
@@ -413,6 +429,10 @@ export function Board({ board, role, user }: { board: { id: string; name: string
     if (pendingEdit.current) {
       setEditing(pendingEdit.current);
       pendingEdit.current = null;
+    }
+    if (pendingComment.current) {
+      setCommentDraft(pendingComment.current);
+      pendingComment.current = null;
     }
   };
 
@@ -677,11 +697,23 @@ export function Board({ board, role, user }: { board: { id: string; name: string
           </button>
         </div>
       </header>
+      <Comments
+        boardId={board.id}
+        userId={user.id}
+        canComment={mayComment}
+        vp={vp}
+        size={size}
+        lookup={(id) => byId.get(id)}
+        provider={provider}
+        draft={commentDraft}
+        onDraftDone={() => setCommentDraft(null)}
+      />
       <ShareDialog boardId={board.id} role={role} userId={user.id} linkAccess={board.linkAccess} open={shareOpen} onClose={() => setShareOpen(false)} />
 
       <nav aria-label="Инструменты" className="absolute left-3 top-1/2 flex max-h-[calc(100%-140px)] -translate-y-1/2 flex-col gap-1 overflow-y-auto rounded-md bg-bg p-1 shadow-toolbar">
         <ToolButton label={t.board.select} active={tool === "select"} onClick={() => setTool("select")}><MousePointer2 size={20} /></ToolButton>
         <ToolButton label={t.board.hand} active={tool === "hand"} onClick={() => setTool("hand")}><Hand size={20} /></ToolButton>
+        {mayComment && <ToolButton label={t.comments.tool} active={tool === "comment"} onClick={() => setTool("comment")}><MessageCircle size={20} /></ToolButton>}
         {canEdit && (
           <>
             <ToolButton label={t.board.sticky} active={tool === "sticky"} onClick={() => setTool("sticky")}><StickyNote size={20} /></ToolButton>

@@ -70,3 +70,29 @@ export async function setLinkAccess(boardId: string, access: string) {
   const user = await requireUser();
   await data.setLinkAccess(user.id, id.parse(boardId), z.enum(["private", "view", "comment", "edit"]).parse(access));
 }
+
+// ---------- comments (S09) ----------
+
+const body = z.string().trim().min(1).max(5000);
+const mentions = z.array(z.string().uuid()).max(50);
+
+export async function listThreads(boardId: string) {
+  const user = await requireUser();
+  return data.listThreads(user.id, id.parse(boardId));
+}
+
+export async function createThread(boardId: string, at: { x: number; y: number; itemId?: string | null }, text: string, mentioned: string[]) {
+  const user = await requireUser();
+  const pos = z.object({ x: z.number().finite(), y: z.number().finite(), itemId: z.string().max(40).nullish() }).parse(at);
+  return data.createThread(user.id, id.parse(boardId), pos, body.parse(text), mentions.parse(mentioned));
+}
+
+export async function replyToThread(threadId: string, text: string, mentioned: string[]) {
+  const user = await requireUser();
+  return data.replyToThread(user.id, id.parse(threadId), body.parse(text), mentions.parse(mentioned));
+}
+
+export async function setThreadResolved(threadId: string, resolved: boolean) {
+  const user = await requireUser();
+  await data.setThreadResolved(user.id, id.parse(threadId), z.boolean().parse(resolved));
+}

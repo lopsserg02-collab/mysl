@@ -98,3 +98,39 @@ for (const [name, load] of layers) {
     assert.ok((await data.listBoards(stranger.id)).some((b) => b.id === board.id));
   });
 }
+
+for (const [name, load] of layers) {
+  test(`${name}: comments, replies, resolve, mentions, and who may write`, async () => {
+    const data = await load();
+    const owner = await data.upsertUserByEmail(`co-${uniq()}@example.com`, "Ольга");
+    const commenter = await data.upsertUserByEmail(`cc-${uniq()}@example.com`, "Костя");
+    const viewer = await data.upsertUserByEmail(`cv-${uniq()}@example.com`, "Вера");
+    const outsider = await data.upsertUserByEmail(`cx-${uniq()}@example.com`, "Хаким");
+    const board = await data.createBoard(owner.id, "Обсуждение");
+    await data.shareBoard(owner.id, board.id, commenter.email, "commenter");
+    await data.shareBoard(owner.id, board.id, viewer.email, "viewer");
+
+    const thread = await data.createThread(owner.id, board.id, { x: 10, y: 20, itemId: "sticky1" }, "  @Костя посмотри  ", [commenter.id, outsider.id, owner.id]);
+    assert.equal(thread.comments[0].body, "@Костя посмотри");
+    assert.equal(thread.comments[0].authorName, "Ольга");
+    // Only people on the board are notified, and never the author
+    assert.equal(await data.unreadMentions(commenter.id), 1);
+    assert.equal(await data.unreadMentions(outsider.id), 0);
+    assert.equal(await data.unreadMentions(owner.id), 0);
+
+    await data.replyToThread(commenter.id, thread.id, "Готово");
+    await data.setThreadResolved(commenter.id, thread.id, true);
+    const [read] = await data.listThreads(viewer.id, board.id);
+    assert.equal(read.itemId, "sticky1");
+    assert.equal(read.resolved, true);
+    assert.deepEqual(read.comments.map((c) => [c.authorName, c.body]), [["Ольга", "@Костя посмотри"], ["Костя", "Готово"]]);
+
+    // Viewers read but do not write; outsiders see nothing
+    await assert.rejects(data.createThread(viewer.id, board.id, { x: 0, y: 0 }, "нельзя"));
+    await assert.rejects(data.replyToThread(viewer.id, thread.id, "нельзя"));
+    await assert.rejects(data.setThreadResolved(viewer.id, thread.id, false));
+    await assert.rejects(data.listThreads(outsider.id, board.id));
+    await assert.rejects(data.replyToThread(outsider.id, thread.id, "нельзя"));
+    await assert.rejects(data.createThread(owner.id, board.id, { x: 0, y: 0 }, "   "));
+  });
+}

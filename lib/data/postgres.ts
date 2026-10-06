@@ -3,7 +3,7 @@
 // so the row level security policies in db/migrations decide what each person can see and change.
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
-import { AccessError, type Board, type BoardListItem, type BoardRole, type DataLayer, type Person, type User } from "./types";
+import { AccessError, type Board, type BoardListItem, type BoardRole, type DataLayer, type Comment, type CommentThread, type Person, type User } from "./types";
 
 type Sql = postgres.Sql;
 type Tx = postgres.TransactionSql;
@@ -188,7 +188,80 @@ export const postgresData: DataLayer = {
     const [row] = await asUser(userId, (tx) => tx<{ role: BoardRole | null }[]>`select join_board_via_link(${boardId}) as role`);
     return row?.role ?? null;
   },
+
+  listThreads(userId, boardId) {
+    if (!UUID.test(boardId)) return Promise.resolve([]);
+    return asUser(userId, async (tx) => {
+      const rows = await tx<CommentRow[]>`select * from board_comments(${boardId})`;
+      const threads = new Map<string, CommentThread>();
+      for (const r of rows) {
+        let t = threads.get(r.thread_id);
+        if (!t) {
+          t = { id: r.thread_id, itemId: r.item_id, x: r.x, y: r.y, resolved: r.resolved, createdBy: r.thread_created_by, createdAt: r.thread_created_at.toISOString(), comments: [] };
+          threads.set(t.id, t);
+        }
+        t.comments.push({ id: r.comment_id, authorId: r.author_id, authorName: r.author_name, body: r.body, createdAt: r.created_at.toISOString() });
+      }
+      return [...threads.values()];
+    });
+  },
+
+  createThread(userId, boardId, at, body, mentions = []) {
+    return asUser(userId, async (tx) => {
+      const id = randomUUID();
+      await tx`insert into comment_threads (id, board_id, item_id, x, y, created_by) values (${id}, ${boardId}, ${at.itemId ?? null}, ${at.x}, ${at.y}, ${userId})`;
+      const comment = await insertComment(tx, userId, id, body, mentions);
+      return { id, itemId: at.itemId ?? null, x: at.x, y: at.y, resolved: false, createdBy: userId, createdAt: comment.createdAt, comments: [comment] };
+    });
+  },
+
+  replyToThread(userId, threadId, body, mentions = []) {
+    if (!UUID.test(threadId)) return Promise.reject(new AccessError());
+    return asUser(userId, (tx) => insertComment(tx, userId, threadId, body, mentions));
+  },
+
+  async setThreadResolved(userId, threadId, resolved) {
+    if (!UUID.test(threadId)) throw new AccessError();
+    const n = await asUser(userId, (tx) =>
+      resolved
+        ? tx`update comment_threads set resolved_at = now(), resolved_by = ${userId} where id = ${threadId}`
+        : tx`update comment_threads set resolved_at = null, resolved_by = null where id = ${threadId}`,
+    );
+    if (n.count === 0) throw new AccessError();
+  },
+
+  async unreadMentions(userId) {
+    const [row] = await asUser(userId, (tx) => tx<{ n: number }[]>`select count(*)::int as n from notifications where user_id = ${userId} and kind = 'mention' and read_at is null`);
+    return row.n;
+  },
 };
+
+interface CommentRow {
+  thread_id: string;
+  item_id: string | null;
+  x: number;
+  y: number;
+  resolved: boolean;
+  thread_created_by: string;
+  thread_created_at: Date;
+  comment_id: string;
+  author_id: string;
+  author_name: string;
+  body: string;
+  created_at: Date;
+}
+
+async function insertComment(tx: Tx, userId: string, threadId: string, body: string, mentions: string[]): Promise<Comment> {
+  const clean = body.trim();
+  if (!clean || clean.length > 5000) throw new Error("Comment must be 1 to 5000 characters");
+  const id = randomUUID();
+  // Row level security checks the caller may comment on the thread's board.
+  await tx`insert into comments (id, thread_id, author_id, body) values (${id}, ${threadId}, ${userId}, ${clean})`;
+  const ids = mentions.filter((m) => UUID.test(m));
+  if (ids.length) await tx`select notify_mentions(${id}, ${ids}::uuid[])`;
+  const [me] = await tx<{ name: string }[]>`select name from profiles where id = ${userId}`;
+  return { id, authorId: userId, authorName: me?.name ?? "", body: clean, createdAt: new Date().toISOString() };
+}
 
 export async function closePostgres() {
   await client?.end();

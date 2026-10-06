@@ -47,7 +47,11 @@ test("F08: invite by email before sign-up, change the role, open to everyone by 
   await expect(stranger.getByRole("heading", { name: "Эта доска недоступна" })).toBeVisible();
   await dialog.getByRole("combobox", { name: "Доступ по ссылке" }).selectOption("view");
   await expect(dialog.getByText("только тот, кто вошёл")).toBeVisible();
-  await stranger.reload();
+  // The setting saves in the background; the stranger's next visit gets in once it has.
+  await expect(async () => {
+    await stranger.reload();
+    await expect(stranger.getByRole("navigation", { name: "Инструменты" })).toBeVisible({ timeout: 2000 });
+  }).toPass();
   await boardReady(stranger);
   await expect(stranger.getByRole("button", { name: "Стикер (N)" })).toHaveCount(0);
   // Viewers see who is on the board but cannot change it
@@ -57,10 +61,11 @@ test("F08: invite by email before sign-up, change the role, open to everyone by 
   await expect(theirs.getByLabel("Почта человека")).toHaveCount(0);
   await expect(theirs.getByRole("combobox", { name: "Доступ по ссылке" })).toBeDisabled();
 
-  // Removing someone takes the board away
+  // Closing the link and removing someone takes the board away (server actions run in order,
+  // so the link is private by the time the removal shows in the list)
+  await dialog.getByRole("combobox", { name: "Доступ по ссылке" }).selectOption("private");
   await dialog.getByRole("button", { name: "Убрать с доски: Гоша" }).click();
   await expect(dialog.getByRole("listitem").filter({ hasText: "Гоша" })).toHaveCount(0);
-  await dialog.getByRole("combobox", { name: "Доступ по ссылке" }).selectOption("private");
   await guest.reload();
   await expect(guest.getByRole("heading", { name: "Эта доска недоступна" })).toBeVisible();
   check();
