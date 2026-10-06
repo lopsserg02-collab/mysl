@@ -3,7 +3,7 @@
 // so the row level security policies in db/migrations decide what each person can see and change.
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
-import { AccessError, type Board, type BoardListItem, type BoardRole, type DataLayer, type User } from "./types";
+import { AccessError, type Board, type BoardListItem, type BoardRole, type DataLayer, type Person, type User } from "./types";
 
 type Sql = postgres.Sql;
 type Tx = postgres.TransactionSql;
@@ -19,11 +19,17 @@ function sql(): Sql {
 }
 
 async function asUser<T>(userId: string, fn: (tx: Tx) => Promise<T>): Promise<T> {
-  return sql().begin(async (tx) => {
-    await tx`select set_config('request.jwt.claims', ${JSON.stringify({ sub: userId, role: "authenticated" })}, true)`;
-    await tx.unsafe("set local role authenticated");
-    return fn(tx);
-  }) as Promise<T>;
+  try {
+    return (await sql().begin(async (tx) => {
+      await tx`select set_config('request.jwt.claims', ${JSON.stringify({ sub: userId, role: "authenticated" })}, true)`;
+      await tx.unsafe("set local role authenticated");
+      return fn(tx);
+    })) as T;
+  } catch (e) {
+    // insufficient_privilege, raised by the sharing functions and by row level security
+    if ((e as { code?: string }).code === "42501") throw new AccessError();
+    throw e;
+  }
 }
 
 interface BoardRow {
@@ -150,6 +156,37 @@ export const postgresData: DataLayer = {
 
   async touchBoard() {
     // Board content time lives in board_docs; nothing to do.
+  },
+
+  listPeople(userId, boardId) {
+    return asUser(userId, async (tx) => {
+      const rows = await tx<{ user_id: string | null; name: string; email: string; role: BoardRole; pending: boolean }[]>`select * from board_people(${boardId})`;
+      return rows.map((r): Person => ({ userId: r.user_id, name: r.name, email: r.email, role: r.role, pending: r.pending }));
+    });
+  },
+
+  async shareBoard(userId, boardId, email, role) {
+    const [row] = await asUser(userId, (tx) => tx<{ r: "added" | "invited" }[]>`select share_board(${boardId}, ${email}, ${role}) as r`);
+    return row.r;
+  },
+
+  async setMemberRole(userId, boardId, memberId, role) {
+    await asUser(userId, (tx) => tx`select set_member_role(${boardId}, ${memberId}, ${role})`);
+  },
+
+  async cancelInvite(userId, boardId, email) {
+    await asUser(userId, (tx) => tx`select cancel_invite(${boardId}, ${email})`);
+  },
+
+  async setLinkAccess(userId, boardId, access) {
+    const n = await asUser(userId, (tx) => tx`update boards set link_access = ${access} where id = ${boardId} and deleted_at is null`);
+    if (n.count === 0) throw new AccessError();
+  },
+
+  async joinViaLink(userId, boardId) {
+    if (!UUID.test(boardId)) return null;
+    const [row] = await asUser(userId, (tx) => tx<{ role: BoardRole | null }[]>`select join_board_via_link(${boardId}) as role`);
+    return row?.role ?? null;
   },
 };
 

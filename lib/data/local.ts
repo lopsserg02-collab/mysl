@@ -2,7 +2,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { AccessError, type Board, type BoardListItem, type BoardRole, type DataLayer, type User } from "./types";
+import { AccessError, SHARE_ROLES, linkRole, type Board, type BoardListItem, type BoardRole, type DataLayer, type Person, type ShareRole, type User } from "./types";
 
 interface Db {
   users: User[];
@@ -10,6 +10,7 @@ interface Db {
   teamMembers: { teamId: string; userId: string; role: "owner" | "admin" | "member" }[];
   boards: Board[];
   boardMembers: { boardId: string; userId: string; role: BoardRole; starred: boolean; lastOpenedAt: string | null }[];
+  invites?: { boardId: string; email: string; role: ShareRole; invitedBy: string; acceptedAt: string | null }[];
 }
 
 const DATA_DIR = process.env.DATA_DIR ?? path.join(process.cwd(), ".data");
@@ -65,6 +66,18 @@ const latest = (a: string, b?: string) => (b && b > a ? b : a);
 const now = () => new Date().toISOString();
 const canManage = (r: BoardRole | null) => r === "owner" || r === "coowner";
 
+function requireManager(db: Db, boardId: string, userId: string): Board {
+  const b = db.boards.find((x) => x.id === boardId && !x.deletedAt);
+  if (!b || !canManage(roleOf(db, boardId, userId))) throw new AccessError();
+  return b;
+}
+
+function checkRole(role: ShareRole | null) {
+  if (role !== null && !SHARE_ROLES.includes(role)) throw new Error("Unknown role");
+}
+
+const ROLE_ORDER: BoardRole[] = ["owner", "coowner", "editor", "commenter", "viewer"];
+
 function roleOf(db: Db, boardId: string, userId: string): BoardRole | null {
   return db.boardMembers.find((m) => m.boardId === boardId && m.userId === userId)?.role ?? null;
 }
@@ -80,6 +93,12 @@ export const localData: DataLayer = {
         const teamId = randomUUID();
         db.teams.push({ id: teamId, name: `${user.name}'s team`, createdBy: user.id });
         db.teamMembers.push({ teamId, userId: user.id, role: "owner" });
+        // Invites waiting for this address become memberships.
+        for (const inv of db.invites ?? []) {
+          if (inv.email !== key || inv.acceptedAt) continue;
+          db.boardMembers.push({ boardId: inv.boardId, userId: user.id, role: inv.role, starred: false, lastOpenedAt: null });
+          inv.acceptedAt = now();
+        }
       } else if (name.trim()) {
         user.name = name.trim();
       }
@@ -186,5 +205,75 @@ export const localData: DataLayer = {
     tx((db) => {
       const b = db.boards.find((x) => x.id === boardId);
       if (b) b.updatedAt = now();
+    }),
+
+  listPeople: (userId, boardId) =>
+    tx((db) => {
+      if (!roleOf(db, boardId, userId)) throw new AccessError();
+      const people: Person[] = db.boardMembers
+        .filter((m) => m.boardId === boardId)
+        .map((m) => {
+          const u = db.users.find((x) => x.id === m.userId)!;
+          return { userId: u.id, name: u.name, email: u.email, role: m.role, pending: false };
+        })
+        .sort((a, b) => ROLE_ORDER.indexOf(a.role) - ROLE_ORDER.indexOf(b.role) || a.name.localeCompare(b.name));
+      for (const i of db.invites ?? []) if (i.boardId === boardId && !i.acceptedAt) people.push({ userId: null, name: "", email: i.email, role: i.role, pending: true });
+      return people;
+    }, false),
+
+  shareBoard: (userId, boardId, email, role) =>
+    tx((db) => {
+      requireManager(db, boardId, userId);
+      checkRole(role);
+      const key = email.trim().toLowerCase();
+      const user = db.users.find((u) => u.email === key);
+      if (user) {
+        const m = db.boardMembers.find((x) => x.boardId === boardId && x.userId === user.id);
+        if (!m) db.boardMembers.push({ boardId, userId: user.id, role, starred: false, lastOpenedAt: null });
+        else if (!canManage(m.role)) m.role = role;
+        return "added" as const;
+      }
+      db.invites ??= [];
+      const inv = db.invites.find((i) => i.boardId === boardId && i.email === key);
+      if (inv) Object.assign(inv, { role, acceptedAt: null });
+      else db.invites.push({ boardId, email: key, role, invitedBy: userId, acceptedAt: null });
+      return "invited" as const;
+    }),
+
+  setMemberRole: (userId, boardId, memberId, role) =>
+    tx((db) => {
+      requireManager(db, boardId, userId);
+      checkRole(role);
+      const i = db.boardMembers.findIndex((x) => x.boardId === boardId && x.userId === memberId);
+      if (i < 0) return;
+      if (db.boardMembers[i].role === "owner") throw new AccessError("The owner cannot be changed");
+      if (role === null) db.boardMembers.splice(i, 1);
+      else db.boardMembers[i].role = role;
+    }),
+
+  cancelInvite: (userId, boardId, email) =>
+    tx((db) => {
+      requireManager(db, boardId, userId);
+      const key = email.trim().toLowerCase();
+      db.invites = (db.invites ?? []).filter((i) => !(i.boardId === boardId && i.email === key && !i.acceptedAt));
+    }),
+
+  setLinkAccess: (userId, boardId, access) =>
+    tx((db) => {
+      const b = requireManager(db, boardId, userId);
+      b.linkAccess = access;
+      b.updatedAt = now();
+    }),
+
+  joinViaLink: (userId, boardId) =>
+    tx((db) => {
+      const b = db.boards.find((x) => x.id === boardId && !x.deletedAt);
+      if (!b) return null;
+      const current = roleOf(db, boardId, userId);
+      if (current) return current;
+      const via = linkRole(b.linkAccess);
+      if (!via) return null;
+      db.boardMembers.push({ boardId, userId, role: via, starred: false, lastOpenedAt: null });
+      return via;
     }),
 };

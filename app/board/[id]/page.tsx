@@ -16,7 +16,9 @@ export default async function BoardPage({ params }: { params: Promise<{ id: stri
   const { id } = await params;
   const user = await requireUser(`/board/${id}`);
   const valid = /^[0-9a-f-]{36}$/.test(id);
-  const [board, role] = valid ? await Promise.all([data.getBoard(id), data.getRole(id, user.id)]) : [null, null];
+  const [board, member] = valid ? await Promise.all([data.getBoard(id), data.getRole(id, user.id)]) : [null, null];
+  // Not on the board yet: a link that is open to signed-in people adds them.
+  const role = member ?? (board && board.linkAccess !== "private" ? await data.joinViaLink(user.id, id) : null);
 
   if (!board || !role) {
     return (
@@ -29,5 +31,5 @@ export default async function BoardPage({ params }: { params: Promise<{ id: stri
   }
 
   await data.markOpened(user.id, id);
-  return <BoardClient board={{ id: board.id, name: board.name }} role={role} user={{ id: user.id, name: user.name }} />;
+  return <BoardClient board={{ id: board.id, name: board.name, linkAccess: board.linkAccess }} role={role} user={{ id: user.id, name: user.name }} />;
 }

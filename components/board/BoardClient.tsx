@@ -1,6 +1,6 @@
 "use client";
 import dynamic from "next/dynamic";
-import type { BoardRole } from "@/lib/data/types";
+import type { BoardRole, LinkAccess } from "@/lib/data/types";
 import { t } from "@/lib/copy";
 
 // Konva only runs in the browser.
@@ -13,7 +13,7 @@ const Board = dynamic(() => import("./Board").then((m) => m.Board), {
   ),
 });
 
-export function BoardClient(props: { board: { id: string; name: string }; role: BoardRole; user: { id: string; name: string } }) {
+export function BoardClient(props: { board: { id: string; name: string; linkAccess: LinkAccess }; role: BoardRole; user: { id: string; name: string } }) {
   return (
     <div className="fixed inset-0">
       <Board {...props} />

@@ -37,3 +37,36 @@ export async function restoreBoard(boardId: string) {
   await data.restoreBoard(user.id, id.parse(boardId));
   revalidatePath("/");
 }
+
+// ---------- sharing (S08) ----------
+
+const shareRole = z.enum(["editor", "commenter", "viewer"]);
+
+export async function listPeople(boardId: string) {
+  const user = await requireUser();
+  return data.listPeople(user.id, id.parse(boardId));
+}
+
+export async function shareBoard(boardId: string, email: string, role: string): Promise<{ ok: true; result: "added" | "invited" } | { ok: false }> {
+  const user = await requireUser();
+  const parsed = z.string().trim().email().max(200).safeParse(email);
+  if (!parsed.success) return { ok: false };
+  const result = await data.shareBoard(user.id, id.parse(boardId), parsed.data, shareRole.parse(role));
+  return { ok: true, result };
+}
+
+export async function setMemberRole(boardId: string, memberId: string, role: string | null) {
+  const user = await requireUser();
+  await data.setMemberRole(user.id, id.parse(boardId), id.parse(memberId), role === null ? null : shareRole.parse(role));
+  revalidatePath("/");
+}
+
+export async function cancelInvite(boardId: string, email: string) {
+  const user = await requireUser();
+  await data.cancelInvite(user.id, id.parse(boardId), z.string().email().parse(email));
+}
+
+export async function setLinkAccess(boardId: string, access: string) {
+  const user = await requireUser();
+  await data.setLinkAccess(user.id, id.parse(boardId), z.enum(["private", "view", "comment", "edit"]).parse(access));
+}

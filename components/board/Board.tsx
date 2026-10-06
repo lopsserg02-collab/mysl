@@ -5,9 +5,9 @@ import { Stage, Layer, Rect, Line, Arrow, Ellipse, Transformer } from "react-kon
 import type Konva from "konva";
 import {
   ArrowLeft, Hand, MousePointer2, StickyNote, Type, Square, Circle, Triangle, Diamond, RectangleHorizontal, MoveUpRight, Pen, Highlighter, Eraser, Frame,
-  Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Copy, Trash2, BringToFront, SendToBack, WifiOff, Lock, Unlock, CornerDownRight, ArrowRight,
+  Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Copy, Trash2, BringToFront, SendToBack, WifiOff, Lock, Unlock, CornerDownRight, ArrowRight, Share2,
 } from "lucide-react";
-import type { BoardRole } from "@/lib/data/types";
+import type { BoardRole, LinkAccess } from "@/lib/data/types";
 import { t } from "@/lib/copy";
 import {
   addItem, addSticky, boxOf, bringToFront, deleteItems, duplicateItems, hasText, itemsInside, sendToBack, simplify, updateItems, bboxOfPoints,
@@ -18,6 +18,7 @@ import { renameBoard } from "@/app/actions";
 import { useBoardDoc } from "./useBoardDoc";
 import { bounds, fitTo, intersects, stepZoom, toBoard, zoomAt, type Viewport } from "./viewport";
 import { ItemView } from "./ItemView";
+import { ShareDialog } from "./ShareDialog";
 import { FONT, PAD, autoTextWidth, fittedFontSize, textHeight } from "./text";
 
 type Tool = "select" | "hand" | "sticky" | "text" | "shape" | "connector" | "pen" | "highlighter" | "eraser" | "frame";
@@ -36,7 +37,8 @@ type Drag =
 
 const rectFrom = (a: Pt, b: Pt): Box => ({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) });
 
-export function Board({ board, role, user }: { board: { id: string; name: string }; role: BoardRole; user: { id: string; name: string } }) {
+export function Board({ board, role, user }: { board: { id: string; name: string; linkAccess: LinkAccess }; role: BoardRole; user: { id: string; name: string } }) {
+  const [shareOpen, setShareOpen] = useState(false);
   const canEdit = role === "owner" || role === "coowner" || role === "editor";
   const canRename = role === "owner" || role === "coowner";
   const { doc, provider, items, status, peers, undo, ready } = useBoardDoc(board.id, user);
@@ -136,7 +138,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      if (target.closest("input, textarea, select, [contenteditable=true]")) return;
+      if (target.closest("input, textarea, select, [contenteditable=true], dialog")) return;
       const mod = e.metaKey || e.ctrlKey;
       if (e.type === "keyup") {
         if (e.code === "Space") setSpaceDown(false);
@@ -665,8 +667,17 @@ export function Board({ board, role, user }: { board: { id: string; name: string
           {peers.map((p) => (
             <Avatar key={p.clientId} name={p.name} color={p.color.fill} label={p.name} />
           ))}
+          <button
+            type="button"
+            onClick={() => setShareOpen(true)}
+            className="ml-1 flex h-9 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-on-accent hover:bg-accent-hover"
+          >
+            <Share2 size={16} aria-hidden /> <span className="hidden sm:inline">{t.share.open}</span>
+            <span className="sr-only sm:hidden">{t.share.open}</span>
+          </button>
         </div>
       </header>
+      <ShareDialog boardId={board.id} role={role} userId={user.id} linkAccess={board.linkAccess} open={shareOpen} onClose={() => setShareOpen(false)} />
 
       <nav aria-label="Инструменты" className="absolute left-3 top-1/2 flex max-h-[calc(100%-140px)] -translate-y-1/2 flex-col gap-1 overflow-y-auto rounded-md bg-bg p-1 shadow-toolbar">
         <ToolButton label={t.board.select} active={tool === "select"} onClick={() => setTool("select")}><MousePointer2 size={20} /></ToolButton>
