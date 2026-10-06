@@ -14,9 +14,11 @@ export function guard(page: Page) {
 
 export async function signIn(page: Page, email: string, name: string) {
   await page.goto("/login");
-  await page.getByLabel("Как вас зовут").fill(name);
-  await page.getByLabel("Электронная почта").fill(email);
-  await page.getByRole("button", { name: "Войти" }).click();
+  // The test sign-in form; the Supabase form above it has its own email field when Supabase is configured.
+  const form = page.locator("form", { has: page.getByLabel("Как вас зовут") });
+  await form.getByLabel("Как вас зовут").fill(name);
+  await form.getByLabel("Электронная почта").fill(email);
+  await form.getByRole("button", { name: "Войти", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Мои доски" })).toBeVisible();
 }
 

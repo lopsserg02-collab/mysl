@@ -19,6 +19,8 @@
     "@hocuspocus/extension-database": "^4.7.0",
     "@hocuspocus/provider": "^4.7.0",
     "@hocuspocus/server": "^4.7.0",
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.117.2",
     "konva": "^10.7.1",
     "lucide-react": "^1.52.0",
     "nanoid": "^5.1.0",
