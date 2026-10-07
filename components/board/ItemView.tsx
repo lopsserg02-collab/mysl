@@ -1,26 +1,72 @@
 "use client";
 import { memo, useEffect, useState } from "react";
-import { Group, Rect, Text, Ellipse, Line, Arrow, Image as KImage } from "react-konva";
+import { Group, Rect, Shape, Text, Ellipse, Line, Arrow, Image as KImage } from "react-konva";
 import { connectorPoints, type Box, type Item } from "@/lib/board/model";
-import { FRAME, stickyPair } from "@/lib/board/palette";
-import { FONT, PAD, fittedFontSize } from "./text";
+import { CANVAS, FRAME, stickyPair } from "@/lib/board/palette";
+import { FONT, PAD, fittedFontSize, fontStyleOf } from "./text";
+
+const SHADOW = CANVAS.shadow;
 
 export interface ItemViewProps {
   item: Item;
   editing: boolean;
+  /** Only frames, connectors and drawings draw differently with zoom; the board passes 1 to the rest so zooming skips them. */
   scale: number;
-  lookup: (id: string) => Box | undefined;
+  /** "low" when the board is zoomed far out: no shadows and no text, which is unreadable there anyway. */
+  detail: Detail;
+  /** The items a connector's ends are attached to. */
+  from?: Box;
+  to?: Box;
   onTransformEnd?: () => void;
 }
+export type Detail = "full" | "low";
+
 
 /** One board item drawn with Konva. Every node carries `itemId` so hit-testing can find the item. */
-export const ItemView = memo(function ItemView({ item: i, editing, scale, lookup, onTransformEnd }: ItemViewProps) {
+export const ItemView = memo(function ItemView({ item: i, editing, scale, detail, from, to, onTransformEnd }: ItemViewProps) {
+  const low = detail === "low";
+  if (low && (i.type === "sticky" || i.type === "text" || i.type === "shape")) {
+    // Far out, one plain node per item: thousands of them are on screen and every node costs a little to draw.
+    const fill = i.type === "sticky" ? stickyPair(i.color).fill : i.type === "text" ? i.color : i.fill === "none" ? "transparent" : stickyPair(i.fill).fill;
+    return (
+      <Rect
+        id={`item-${i.id}`}
+        itemId={i.id}
+        x={i.x}
+        y={i.y}
+        width={i.w}
+        height={i.h}
+        fill={fill}
+        opacity={i.type === "text" ? 0.2 : 1}
+        stroke={i.type === "shape" ? i.stroke : undefined}
+        strokeWidth={i.type === "shape" ? 1 : 0}
+        strokeScaleEnabled={false}
+        perfectDrawEnabled={false}
+        onTransformEnd={onTransformEnd}
+      />
+    );
+  }
   switch (i.type) {
     case "sticky": {
       const pair = stickyPair(i.color);
       return (
         <Group id={`item-${i.id}`} itemId={i.id} x={i.x} y={i.y} onTransformEnd={onTransformEnd}>
-          <Rect width={i.w} height={i.h} fill={pair.fill} shadowColor="#101828" shadowOpacity={0.12} shadowBlur={8} shadowOffsetY={3} cornerRadius={2} />
+          {/* A soft shadow from two offset translucent layers: a canvas blur on every note costs more than the rest
+              of the frame. Its own size is the note's, so selection handles hug the note, not the shadow. */}
+          <Shape
+            width={i.w}
+            height={i.h}
+            listening={false}
+            perfectDrawEnabled={false}
+            sceneFunc={(ctx) => {
+              ctx.setAttr("fillStyle", SHADOW);
+              ctx.setAttr("globalAlpha", 0.05);
+              ctx.fillRect(-1, 2, i.w + 2, i.h + 4);
+              ctx.setAttr("globalAlpha", 0.08);
+              ctx.fillRect(0, 1, i.w, i.h + 1);
+            }}
+          />
+          <Rect width={i.w} height={i.h} fill={pair.fill} cornerRadius={2} perfectDrawEnabled={false} />
           {!editing && <BoxText item={i} color={pair.text} />}
         </Group>
       );
@@ -29,16 +75,27 @@ export const ItemView = memo(function ItemView({ item: i, editing, scale, lookup
       return (
         <Group id={`item-${i.id}`} itemId={i.id} x={i.x} y={i.y} onTransformEnd={onTransformEnd}>
           {/* transparent hit area so empty space inside a text box is clickable */}
-          <Rect width={i.w} height={i.h} fill="transparent" />
+          <Rect width={i.w} height={i.h} fill="transparent" perfectDrawEnabled={false} />
           {!editing && (
-            <Text width={i.w} text={i.text} fontSize={i.fontSize} fontFamily={FONT} lineHeight={1.3} fill={i.color} wrap="word" listening={false} />
+            <Text
+              width={i.w}
+              text={i.text}
+              fontSize={i.fontSize}
+              fontFamily={FONT}
+              fontStyle={fontStyleOf(i) || "normal"}
+              textDecoration={i.underline ? "underline" : ""}
+              lineHeight={1.3}
+              fill={i.color}
+              wrap="word"
+              listening={false}
+            />
           )}
         </Group>
       );
     case "shape": {
       const fill = i.fill === "none" ? "transparent" : stickyPair(i.fill).fill;
       const textColor = i.fill === "none" ? i.stroke : stickyPair(i.fill).text;
-      const common = { fill, stroke: i.stroke, strokeWidth: 2, strokeScaleEnabled: false };
+      const common = { fill, stroke: i.stroke, strokeWidth: 2, strokeScaleEnabled: false, perfectDrawEnabled: false };
       return (
         <Group id={`item-${i.id}`} itemId={i.id} x={i.x} y={i.y} onTransformEnd={onTransformEnd}>
           {i.kind === "ellipse" ? (
@@ -91,7 +148,7 @@ export const ItemView = memo(function ItemView({ item: i, editing, scale, lookup
         </Group>
       );
     case "connector": {
-      const pts = connectorPoints(i, lookup);
+      const pts = connectorPoints(i, (id) => (id === i.from.itemId ? from : id === i.to.itemId ? to : undefined));
       const mid = midpoint(pts);
       return (
         <Group id={`item-${i.id}`} itemId={i.id}>
@@ -160,7 +217,7 @@ function BoardImage({ src, w, h }: { src: string; w: number; h: number }) {
     };
   }, [src]);
   // Placeholder while loading (or if the file is gone) keeps the item visible and clickable.
-  if (!img) return <Rect width={w} height={h} fill={failed ? "#fde8e8" : "#eceef2"} stroke="#d0d5dd" strokeWidth={1} strokeScaleEnabled={false} />;
+  if (!img) return <Rect width={w} height={h} fill={failed ? CANVAS.placeholderFailed : CANVAS.placeholder} stroke={CANVAS.placeholderBorder} strokeWidth={1} strokeScaleEnabled={false} />;
   return <KImage image={img} width={w} height={h} />;
 }
 
