@@ -43,13 +43,15 @@ test("images: pick a file, it keeps its proportions, survives reload, and only p
   await page.waitForURL(/\/board\//);
   await boardReady(page);
 
+  // Listen before uploading: the picture can load before the item shows in the list.
+  const served = page.waitForResponse((r) => /\/api\/assets\/[0-9a-f-]{36}$/.test(r.url()));
   const chooser = page.waitForEvent("filechooser");
   await page.getByRole("button", { name: "Картинка" }).click();
   await (await chooser).setFiles({ name: "схема.png", mimeType: "image/png", buffer: png(960, 480) });
   await expect(items(page)).toHaveText(["Картинка: схема"]);
 
   // The file is served to the owner
-  const res = await page.waitForResponse((r) => /\/api\/assets\/[0-9a-f-]{36}$/.test(r.url()));
+  const res = await served;
   expect(res.status()).toBe(200);
   expect(res.headers()["content-type"]).toBe("image/png");
   const src = res.url();

@@ -9,7 +9,11 @@ export default defineConfig({
     baseURL: "http://localhost:3000",
     viewport: { width: 1440, height: 900 },
     trace: "retain-on-failure",
-    launchOptions: process.env.PW_CHROMIUM ? { executablePath: process.env.PW_CHROMIUM } : {},
+    launchOptions: {
+      ...(process.env.PW_CHROMIUM ? { executablePath: process.env.PW_CHROMIUM } : {}),
+      // Without a UTF-8 locale Chromium drops non-Latin download names, which real browsers keep.
+      env: { ...process.env, LANG: process.env.LANG || "C.UTF-8" },
+    },
   },
   webServer: {
     command: "npm run dev",

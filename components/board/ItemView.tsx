@@ -120,6 +120,25 @@ export const ItemView = memo(function ItemView({ item: i, editing, scale, lookup
 // Loaded images are shared between every view of the same picture.
 const cache = new Map<string, HTMLImageElement>();
 
+/** Resolves once every picture has loaded (or failed), so an export does not catch placeholders. */
+export function preloadImages(srcs: string[]): Promise<void> {
+  return Promise.all(
+    srcs.map((src) => {
+      let el = cache.get(src);
+      if (!el) {
+        el = new window.Image();
+        el.src = src;
+        cache.set(src, el);
+      }
+      const img = el;
+      return img.complete ? Promise.resolve() : new Promise<void>((done) => {
+        img.addEventListener("load", () => done(), { once: true });
+        img.addEventListener("error", () => done(), { once: true });
+      });
+    }),
+  ).then(() => undefined);
+}
+
 function BoardImage({ src, w, h }: { src: string; w: number; h: number }) {
   const [img, setImg] = useState<HTMLImageElement | null>(() => (cache.get(src)?.complete ? cache.get(src)! : null));
   const [failed, setFailed] = useState(false);

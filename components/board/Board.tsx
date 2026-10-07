@@ -5,7 +5,7 @@ import { Stage, Layer, Rect, Line, Arrow, Ellipse, Transformer } from "react-kon
 import type Konva from "konva";
 import {
   ArrowLeft, Hand, MousePointer2, StickyNote, Type, Square, Circle, Triangle, Diamond, RectangleHorizontal, MoveUpRight, Pen, Highlighter, Eraser, Frame,
-  Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Copy, Trash2, BringToFront, SendToBack, WifiOff, Lock, Unlock, CornerDownRight, ArrowRight, Share2, MessageCircle, ImagePlus,
+  Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Copy, Trash2, BringToFront, SendToBack, WifiOff, Lock, Unlock, CornerDownRight, ArrowRight, Share2, MessageCircle, ImagePlus, Download,
 } from "lucide-react";
 import { canComment, type BoardRole, type LinkAccess } from "@/lib/data/types";
 import { t } from "@/lib/copy";
@@ -17,7 +17,9 @@ import { CANVAS, DEFAULT_INK, INK, STICKY_COLOR_NAMES, ZOOM, stickyPair } from "
 import { renameBoard } from "@/app/actions";
 import { useBoardDoc } from "./useBoardDoc";
 import { bounds, fitTo, intersects, stepZoom, toBoard, zoomAt, type Viewport } from "./viewport";
-import { ItemView } from "./ItemView";
+import { ItemView, preloadImages } from "./ItemView";
+import { ExportDialog } from "./ExportDialog";
+import { download, fileName, renderRegion, toPdfBlob, toPngBlob, type ExportFormat, type ExportScope } from "./exportBoard";
 import { ShareDialog } from "./ShareDialog";
 import { Comments, type CommentDraft } from "./Comments";
 import { FONT, PAD, autoTextWidth, fittedFontSize, textHeight } from "./text";
@@ -40,6 +42,8 @@ const rectFrom = (a: Pt, b: Pt): Box => ({ x: Math.min(a.x, b.x), y: Math.min(a.
 
 export function Board({ board, role, user }: { board: { id: string; name: string; linkAccess: LinkAccess }; role: BoardRole; user: { id: string; name: string } }) {
   const [shareOpen, setShareOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exporting, setExporting] = useState(false); // draws every item, not just what is on screen, and hides selection
   const [commentDraft, setCommentDraft] = useState<CommentDraft | null>(null);
   const mayComment = canComment(role);
   const canEdit = role === "owner" || role === "coowner" || role === "editor";
@@ -560,9 +564,31 @@ export function Board({ board, role, user }: { board: { id: string; name: string
     updateItems(doc, changes);
   };
 
+  // ---------- export ----------
+  const boxOfAny = (i: Item): Box => (i.type === "connector" ? connectorBox(i, lookup) : boxOf(i));
+  const runExport = async ({ format, scope, quality }: { format: ExportFormat; scope: ExportScope; quality: number }) => {
+    const stage = stageRef.current;
+    if (!stage) throw new Error("no stage");
+    const pick = scope === "selection" ? items.filter((i) => selected.includes(i.id)) : items;
+    const regions = scope === "frames" ? items.filter((i) => i.type === "frame").map(boxOf) : [bounds(pick.map(boxOfAny))].filter((b): b is Box => !!b);
+    if (regions.length === 0) throw new Error("nothing to export");
+    await preloadImages(items.filter((i): i is ImageItem => i.type === "image").map((i) => i.src));
+    setExporting(true);
+    trRef.current?.visible(false);
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    try {
+      const canvases = regions.map((b) => renderRegion(stage, vp, b, quality, scope === "frames" ? 0 : undefined));
+      const blob = format === "pdf" ? await toPdfBlob(canvases) : await toPngBlob(canvases[0]);
+      download(blob, fileName(name || t.board.untitled, format));
+    } finally {
+      trRef.current?.visible(true);
+      setExporting(false);
+    }
+  };
+
   // ---------- render ----------
   const view = { x: -vp.x / vp.scale, y: -vp.y / vp.scale, w: size.w / vp.scale, h: size.h / vp.scale };
-  const visible = items.filter((i) => i.type === "connector" || intersects(view, boxOf(i)));
+  const visible = exporting ? items : items.filter((i) => i.type === "connector" || intersects(view, boxOf(i)));
   const peerSelections = peers.flatMap((p) => p.selection.map((id) => ({ id, color: p.color.fill })));
   const editingItem = editing ? byId.get(editing) : undefined;
   const selItems = selected.map((id) => byId.get(id)).filter((i): i is Item => Boolean(i));
@@ -624,13 +650,13 @@ export function Board({ board, role, user }: { board: { id: string; name: string
               {visible.map((i) => (
                 <ItemView key={i.id} item={i} editing={editing === i.id} scale={vp.scale} lookup={lookup} onTransformEnd={onTransformEnd} />
               ))}
-              {peerSelections.map(({ id, color }) => {
+              {!exporting && peerSelections.map(({ id, color }) => {
                 const i = byId.get(id);
                 if (!i) return null;
                 const b = i.type === "connector" ? connectorBox(i, lookup) : boxOf(i);
                 return <Rect key={`peer-${id}-${color}`} x={b.x - 3} y={b.y - 3} width={b.w + 6} height={b.h + 6} stroke={color} strokeWidth={2 / vp.scale} listening={false} />;
               })}
-              {selItems.filter((i) => i.type === "connector" || i.locked || selItems.length > 1).map((i) => {
+              {!exporting && selItems.filter((i) => i.type === "connector" || i.locked || selItems.length > 1).map((i) => {
                 const b = i.type === "connector" ? connectorBox(i, lookup) : boxOf(i);
                 const pad = 4 / vp.scale;
                 return <Rect key={`sel-${i.id}`} x={b.x - pad} y={b.y - pad} width={b.w + pad * 2} height={b.h + pad * 2} stroke={CANVAS.selection} strokeWidth={1.5 / vp.scale} dash={i.locked ? [4 / vp.scale, 3 / vp.scale] : undefined} listening={false} />;
@@ -757,6 +783,15 @@ export function Board({ board, role, user }: { board: { id: string; name: string
           ))}
           <button
             type="button"
+            onClick={() => setExportOpen(true)}
+            aria-label={t.export.open}
+            title={t.export.open}
+            className="flex h-9 w-9 items-center justify-center rounded-md hover:bg-surface-hover"
+          >
+            <Download size={18} aria-hidden />
+          </button>
+          <button
+            type="button"
             onClick={() => setShareOpen(true)}
             className="ml-1 flex h-9 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-on-accent hover:bg-accent-hover"
           >
@@ -796,6 +831,14 @@ export function Board({ board, role, user }: { board: { id: string; name: string
         provider={provider}
         draft={commentDraft}
         onDraftDone={() => setCommentDraft(null)}
+      />
+      <ExportDialog
+        open={exportOpen}
+        onClose={() => setExportOpen(false)}
+        hasSelection={selected.length > 0}
+        frameCount={items.filter((i) => i.type === "frame").length}
+        empty={items.length === 0}
+        onExport={runExport}
       />
       <ShareDialog boardId={board.id} role={role} userId={user.id} linkAccess={board.linkAccess} open={shareOpen} onClose={() => setShareOpen(false)} />
 
