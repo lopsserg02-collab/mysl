@@ -30,13 +30,20 @@ const local: Storage = {
 
 const BUCKET = process.env.SUPABASE_STORAGE_BUCKET || "assets";
 
+// Works with both kinds of Supabase server key: the legacy service_role JWT and the newer sb_secret_ key.
+// The new keys go only in `apikey`; the gateway rejects them as a Bearer token.
+function authHeaders(): Record<string, string> {
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+  return key.startsWith("eyJ") ? { apikey: key, Authorization: `Bearer ${key}` } : { apikey: key };
+}
+
 // The bucket stays private: only the server, with the service key, reads and writes it.
 const supabase: Storage = {
   async put(p, bytes, mime) {
     if (!SAFE.test(p)) throw new Error("Bad storage path");
     const res = await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/${BUCKET}/${p}`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`, "Content-Type": mime, "x-upsert": "false" },
+      headers: { ...authHeaders(), "Content-Type": mime, "x-upsert": "false" },
       body: Buffer.from(bytes),
     });
     if (!res.ok) throw new Error(`Storage upload failed: ${res.status}`);
@@ -44,7 +51,7 @@ const supabase: Storage = {
   async get(p) {
     if (!SAFE.test(p)) return null;
     const res = await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/authenticated/${BUCKET}/${p}`, {
-      headers: { Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}` },
+      headers: authHeaders(),
     });
     return res.ok ? new Uint8Array(await res.arrayBuffer()) : null;
   },
