@@ -2,7 +2,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { AccessError, SHARE_ROLES, canComment, canEditBoard, linkRole, type Board, type BoardListItem, type Asset, type BoardRole, type Comment, type CommentThread, type DataLayer, type Person, type ShareRole, type User } from "./types";
+import { AccessError, SHARE_ROLES, canComment, canEditBoard, linkRole, type Board, type BoardListItem, type Asset, type BoardRole, type Comment, type CommentThread, type DataLayer, type Person, type ShareRole, type Subscription, type BillingWriter, type BoardUsage, type User } from "./types";
 
 interface Db {
   users: User[];
@@ -15,6 +15,8 @@ interface Db {
   comments?: { id: string; threadId: string; authorId: string; body: string; createdAt: string }[];
   assets?: Asset[];
   notifications?: { id: string; userId: string; kind: "mention"; boardId: string; commentId: string; actorId: string; readAt: string | null; createdAt: string }[];
+  subscriptions?: (Subscription & { lastEventAt: string | null })[];
+  stripeEvents?: { id: string; type: string; receivedAt: string }[];
 }
 
 const DATA_DIR = process.env.DATA_DIR ?? path.join(process.cwd(), ".data");
@@ -109,6 +111,25 @@ const toComment = (db: Db, c: NonNullable<Db["comments"]>[number]): Comment => (
 function liveRole(db: Db, boardId: string, userId: string) {
   const b = db.boards.find((x) => x.id === boardId);
   return b && !b.deletedAt ? roleOf(db, boardId, userId) : null;
+}
+
+const EDIT_ROLES: BoardRole[] = ["coowner", "editor"];
+
+function subscriptionOf(db: Db, userId: string): Subscription | null {
+  const row = (db.subscriptions ?? []).find((x) => x.userId === userId);
+  if (!row) return null;
+  const { lastEventAt: _, ...sub } = row;
+  return { ...sub };
+}
+
+function subscriptionRow(db: Db, userId: string) {
+  db.subscriptions ??= [];
+  let row = db.subscriptions.find((x) => x.userId === userId);
+  if (!row) {
+    row = { userId, plan: "free", status: "none", stripeCustomerId: null, stripeSubscriptionId: null, currentPeriodEnd: null, cancelAtPeriodEnd: false, lastEventAt: null };
+    db.subscriptions.push(row);
+  }
+  return row;
 }
 
 function roleOf(db: Db, boardId: string, userId: string): BoardRole | null {
@@ -298,14 +319,15 @@ export const localData: DataLayer = {
       b.updatedAt = now();
     }),
 
-  joinViaLink: (userId, boardId) =>
+  joinViaLink: (userId, boardId, opts = {}) =>
     tx((db) => {
       const b = db.boards.find((x) => x.id === boardId && !x.deletedAt);
       if (!b) return null;
       const current = roleOf(db, boardId, userId);
       if (current) return current;
-      const via = linkRole(b.linkAccess);
+      let via = linkRole(b.linkAccess);
       if (!via) return null;
+      if (via === "editor" && opts.maxRole) via = opts.maxRole;
       db.boardMembers.push({ boardId, userId, role: via, starred: false, lastOpenedAt: null });
       return via;
     }),
@@ -368,4 +390,45 @@ export const localData: DataLayer = {
       const a = (db.assets ?? []).find((x) => x.id === assetId);
       return a && liveRole(db, a.boardId, userId) ? a : null;
     }, false),
+
+  getSubscription: (userId) => tx((db) => subscriptionOf(db, userId), false),
+
+  boardUsage: (boardId) =>
+    tx((db) => {
+      const b = db.boards.find((x) => x.id === boardId);
+      if (!b) return null;
+      const editors: BoardUsage["editors"] = db.boardMembers
+        .filter((m) => m.boardId === boardId && EDIT_ROLES.includes(m.role))
+        .map((m) => ({ userId: m.userId, email: db.users.find((u) => u.id === m.userId)?.email ?? "" }));
+      for (const i of db.invites ?? []) if (i.boardId === boardId && !i.acceptedAt && i.role === "editor") editors.push({ userId: null, email: i.email });
+      const owned = new Set(db.boards.filter((x) => x.ownerId === b.ownerId).map((x) => x.id));
+      const storageBytes = (db.assets ?? []).filter((a) => owned.has(a.boardId)).reduce((n, a) => n + a.bytes, 0);
+      return { ownerId: b.ownerId, ownerSubscription: subscriptionOf(db, b.ownerId), editors, storageBytes };
+    }, false),
+
+  setStripeCustomer: (userId, customerId) =>
+    tx((db) => {
+      subscriptionRow(db, userId).stripeCustomerId = customerId;
+    }),
+
+  applyStripeEvent: (event, apply) =>
+    tx(async (db) => {
+      db.stripeEvents ??= [];
+      if (db.stripeEvents.some((e) => e.id === event.id)) return false;
+      const writer: BillingWriter = {
+        userIdForCustomer: async (customerId) => (db.subscriptions ?? []).find((x) => x.stripeCustomerId === customerId)?.userId ?? null,
+        getSubscription: async (userId) => subscriptionOf(db, userId),
+        saveSubscription: async (userId, { eventAt, ...patch }) => {
+          if (!db.users.some((u) => u.id === userId)) throw new Error("Unknown user");
+          const row = subscriptionRow(db, userId);
+          if (row.lastEventAt && row.lastEventAt > eventAt) return "stale";
+          Object.assign(row, patch, { lastEventAt: eventAt });
+          return "saved";
+        },
+      };
+      // A throw here leaves the file untouched, so Stripe's retry runs the handler again.
+      await apply(writer);
+      db.stripeEvents.push({ id: event.id, type: event.type, receivedAt: now() });
+      return true;
+    }),
 };

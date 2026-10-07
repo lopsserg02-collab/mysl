@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { canComment, type BoardRole, type LinkAccess } from "@/lib/data/types";
 import { t } from "@/lib/copy";
+import { formatBytes } from "@/lib/plans";
 import {
   addItem, addSticky, boxOf, bringToFront, deleteItems, duplicateItems, fitImage, hasText, itemsInside, sendToBack, simplify, updateItems, bboxOfPoints,
   type Box, type ConnectorItem, type DrawingItem, type End, type FrameItem, type ImageItem, type Item, type Patch, type ShapeItem, type ShapeKind, type TextItem,
@@ -107,13 +108,16 @@ export function Board({ board, role, user }: { board: { id: string; name: string
   // ---------- images: picker, paste, drop ----------
   const fileInput = useRef<HTMLInputElement>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [noticePlans, setNoticePlans] = useState(false);
   const uploadImages = async (files: File[], at: Pt) => {
     const images = files.filter((f) => /^image\/(png|jpeg|gif|webp)$/.test(f.type));
     if (!canEdit) return;
     if (images.length === 0) return files.length && setNotice(t.images.unsupported);
     setNotice(t.images.uploading);
+    setNoticePlans(false);
     const added: string[] = [];
     let error: string | null = null;
+    let planLimit = false;
     for (const [n, file] of images.entries()) {
       if (file.size > 30 * 1024 * 1024) {
         error = t.images.tooLarge;
@@ -132,6 +136,12 @@ export function Board({ board, role, user }: { board: { id: string; name: string
         form.set("width", String(dims.width));
         form.set("height", String(dims.height));
         const res = await fetch("/api/assets", { method: "POST", body: form });
+        if (res.status === 402) {
+          const body = (await res.json().catch(() => ({}))) as { max?: number };
+          error = t.limits.storage(formatBytes(body.max ?? 0));
+          planLimit = true;
+          break;
+        }
         if (!res.ok) {
           error = res.status === 413 ? t.images.tooLarge : res.status === 415 ? t.images.unsupported : t.images.failed;
           continue;
@@ -149,6 +159,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
       setTool("select");
     }
     setNotice(error);
+    setNoticePlans(planLimit);
   };
 
   useEffect(() => {
@@ -816,6 +827,9 @@ export function Board({ board, role, user }: { board: { id: string; name: string
       {notice && (
         <div role="status" className="absolute bottom-16 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-md bg-bg px-3 py-2 text-sm shadow-pop">
           {notice}
+          {noticePlans && (
+            <Link href="/pricing" target="_blank" className="shrink-0 font-medium text-accent underline underline-offset-2">{t.limits.seePlans}</Link>
+          )}
           {notice !== t.images.uploading && (
             <button type="button" aria-label={t.comments.close} onClick={() => setNotice(null)} className="text-text-muted hover:text-text">×</button>
           )}

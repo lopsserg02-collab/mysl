@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import { data } from "@/lib/data";
 import { requireUser } from "@/lib/session";
+import { checkEditorSeat } from "@/lib/billing/limits";
 
 const id = z.string().uuid();
 
@@ -47,18 +48,42 @@ export async function listPeople(boardId: string) {
   return data.listPeople(user.id, id.parse(boardId));
 }
 
-export async function shareBoard(boardId: string, email: string, role: string): Promise<{ ok: true; result: "added" | "invited" } | { ok: false }> {
+type LimitReached = { ok: false; limit: "editors"; max: number };
+
+// The plan limit is checked only for managers, so nobody else learns how full a board is.
+async function editorSeat(userId: string, boardId: string, who: { email?: string; userId?: string }): Promise<LimitReached | null> {
+  const mine = await data.getRole(boardId, userId);
+  if (mine !== "owner" && mine !== "coowner") return null; // the data layer refuses it anyway
+  const seat = await checkEditorSeat(data, boardId, who);
+  return seat.ok ? null : { ok: false, limit: "editors", max: seat.plan.editorsPerBoard };
+}
+
+export async function shareBoard(boardId: string, email: string, role: string): Promise<{ ok: true; result: "added" | "invited" } | { ok: false } | LimitReached> {
   const user = await requireUser();
   const parsed = z.string().trim().email().max(200).safeParse(email);
   if (!parsed.success) return { ok: false };
-  const result = await data.shareBoard(user.id, id.parse(boardId), parsed.data, shareRole.parse(role));
+  const board = id.parse(boardId);
+  const r = shareRole.parse(role);
+  if (r === "editor") {
+    const full = await editorSeat(user.id, board, { email: parsed.data });
+    if (full) return full;
+  }
+  const result = await data.shareBoard(user.id, board, parsed.data, r);
   return { ok: true, result };
 }
 
-export async function setMemberRole(boardId: string, memberId: string, role: string | null) {
+export async function setMemberRole(boardId: string, memberId: string, role: string | null): Promise<{ ok: true } | LimitReached> {
   const user = await requireUser();
-  await data.setMemberRole(user.id, id.parse(boardId), id.parse(memberId), role === null ? null : shareRole.parse(role));
+  const board = id.parse(boardId);
+  const member = id.parse(memberId);
+  const r = role === null ? null : shareRole.parse(role);
+  if (r === "editor") {
+    const full = await editorSeat(user.id, board, { userId: member });
+    if (full) return full;
+  }
+  await data.setMemberRole(user.id, board, member, r);
   revalidatePath("/");
+  return { ok: true };
 }
 
 export async function cancelInvite(boardId: string, email: string) {
