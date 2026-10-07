@@ -8,7 +8,7 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const code = url.searchParams.get("code");
   const next = safeNext(url.searchParams.get("next"));
-  // Without Supabase Auth configured there is nothing to exchange; the link is treated as expired.
+  // Without Supabase Auth configured there is no code to exchange: treat it as a stale link.
   if (code && supabaseAuthEnabled()) {
     const { error } = await (await supabaseServer()).auth.exchangeCodeForSession(code);
     if (!error) return NextResponse.redirect(new URL(next, url.origin));

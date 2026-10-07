@@ -173,7 +173,7 @@ export function Comments(props: {
               userId={userId}
               placeholder={t.comments.replyPlaceholder}
               onSubmit={async (text, mentioned) => {
-                await replyToThread(open.id, text, mentioned);
+                await replyToThread(open.id, text, mentioned, boardId);
                 await changed();
               }}
             />

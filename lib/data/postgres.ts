@@ -3,7 +3,8 @@
 // so the row level security policies in db/migrations decide what each person can see and change.
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
-import { AccessError, type Board, type BoardListItem, type BoardRole, type DataLayer, type Asset, type Comment, type CommentThread, type Person, type User, type BillingWriter, type Subscription } from "./types";
+import { cloneBoardState } from "../board/clone";
+import { AccessError, TRASH_DAYS, canEditBoard, type AppNotification, type Board, type BoardListItem, type BoardRole, type DataLayer, type Asset, type Comment, type CommentThread, type Person, type User, type BillingWriter, type Subscription } from "./types";
 
 type Sql = postgres.Sql;
 type Tx = postgres.TransactionSql;
@@ -158,6 +159,49 @@ export const postgresData: DataLayer = {
     // Board content time lives in board_docs; nothing to do.
   },
 
+  async duplicateBoard(userId, boardId, name) {
+    if (!UUID.test(boardId)) throw new AccessError();
+    return asUser(userId, async (tx) => {
+      const [src] = await tx<(BoardRow & { role: BoardRole | null })[]>`select b.*, board_role(b.id, ${userId}) as role from boards b where id = ${boardId} and deleted_at is null`;
+      if (!src || !canEditBoard(src.role)) throw new AccessError();
+      const [team] = await tx<{ team_id: string }[]>`select team_id from team_members where user_id = ${userId} order by created_at limit 1`;
+      if (!team) throw new AccessError("No team for this user");
+      const id = randomUUID();
+      const clean = name.trim().slice(0, 60) || src.name;
+      // Row level security: a new board must be the caller's own, in their team. The trigger makes them owner.
+      await tx`insert into boards (id, team_id, owner_id, name, description) values (${id}, ${team.team_id}, ${userId}, ${clean}, ${src.description})`;
+      // The copy's images get their own asset rows over the same stored files (readable through the source, writable as the new owner).
+      const assets = new Map<string, string>();
+      const rows = await tx<{ id: string; uploaded_by: string | null; storage_path: string; mime: string; bytes: number; width: number | null; height: number | null }[]>`
+        select id, uploaded_by, storage_path, mime, bytes, width, height from assets where board_id = ${boardId}`;
+      for (const a of rows) {
+        const next = randomUUID();
+        assets.set(a.id, next);
+        await tx`insert into assets (id, board_id, uploaded_by, storage_path, mime, bytes, width, height)
+          values (${next}, ${id}, ${a.uploaded_by}, ${a.storage_path}, ${a.mime}, ${a.bytes}, ${a.width}, ${a.height})`;
+      }
+      const [doc] = await tx<{ s: Buffer | null }[]>`select board_doc_state(${boardId}) as s`;
+      const state = cloneBoardState(doc?.s ? new Uint8Array(doc.s) : null, assets);
+      await tx`select seed_board_doc(${id}, ${Buffer.from(state)})`;
+      const [row] = await tx<BoardRow[]>`select * from boards where id = ${id}`;
+      return toBoard(row);
+    });
+  },
+
+  async purgeTrash(at = new Date()) {
+    // A system job: runs as the connection's own role (the database owner), not as a user.
+    const cutoff = new Date(at.getTime() - TRASH_DAYS * 86_400_000);
+    return sql().begin(async (tx) => {
+      const paths = await tx<{ storage_path: string }[]>`
+        select distinct a.storage_path from assets a join boards b on b.id = a.board_id where b.deleted_at < ${cutoff}`;
+      const gone = await tx`delete from boards where deleted_at < ${cutoff}`;
+      const candidates = paths.map((r) => r.storage_path);
+      const kept = candidates.length ? await tx<{ storage_path: string }[]>`select distinct storage_path from assets where storage_path in ${tx(candidates)}` : [];
+      const inUse = new Set(kept.map((r) => r.storage_path));
+      return { boards: gone.count, orphanedFiles: candidates.filter((p) => !inUse.has(p)) };
+    }) as Promise<{ boards: number; orphanedFiles: string[] }>;
+  },
+
   listPeople(userId, boardId) {
     return asUser(userId, async (tx) => {
       const rows = await tx<{ user_id: string | null; name: string; email: string; role: BoardRole; pending: boolean }[]>`select * from board_people(${boardId})`;
@@ -234,6 +278,39 @@ export const postgresData: DataLayer = {
   async unreadMentions(userId) {
     const [row] = await asUser(userId, (tx) => tx<{ n: number }[]>`select count(*)::int as n from notifications where user_id = ${userId} and kind = 'mention' and read_at is null`);
     return row.n;
+  },
+
+  listNotifications(userId, limit = 50) {
+    return asUser(userId, async (tx) => {
+      const rows = await tx<{ id: string; kind: AppNotification["kind"]; board_id: string; board_name: string; actor_name: string; excerpt: string; read: boolean; created_at: Date }[]>`
+        select * from my_notifications(${limit})`;
+      return rows.map((r): AppNotification => ({
+        id: r.id,
+        kind: r.kind,
+        boardId: r.board_id,
+        boardName: r.board_name,
+        actorName: r.actor_name,
+        excerpt: r.excerpt,
+        read: r.read,
+        createdAt: r.created_at.toISOString(),
+      }));
+    });
+  },
+
+  async unreadNotifications(userId) {
+    const [row] = await asUser(userId, (tx) => tx<{ n: number }[]>`select count(*)::int as n from my_notifications(200) where not read`);
+    return row.n;
+  },
+
+  async markNotificationsRead(userId, ids) {
+    const only = ids?.filter((i) => UUID.test(i));
+    if (only && !only.length) return;
+    // Row level security limits this to the caller's own rows whatever ids are passed.
+    await asUser(userId, (tx) =>
+      only
+        ? tx`update notifications set read_at = now() where user_id = ${userId} and read_at is null and id = any(${only}::uuid[])`
+        : tx`update notifications set read_at = now() where user_id = ${userId} and read_at is null`,
+    );
   },
 
   async createAsset(userId, a) {

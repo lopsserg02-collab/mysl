@@ -2,9 +2,9 @@
 import Link from "next/link";
 import { useState, useTransition } from "react";
 import { MoreHorizontal, Star } from "lucide-react";
-import type { BoardListItem } from "@/lib/data/types";
+import { canEditBoard, daysUntilPurge, type BoardListItem } from "@/lib/data/types";
 import { t } from "@/lib/copy";
-import { renameBoard, restoreBoard, setStarred, trashBoard } from "@/app/actions";
+import { duplicateBoard, renameBoard, restoreBoard, setStarred, trashBoard } from "@/app/actions";
 
 const fmt = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
@@ -12,7 +12,9 @@ export function BoardCard({ board, trashed }: { board: BoardListItem; trashed: b
   const [menu, setMenu] = useState(false);
   const [editing, setEditing] = useState(false);
   const [pending, start] = useTransition();
+  const [error, setError] = useState(false);
   const isOwner = board.role === "owner" || board.role === "coowner";
+  const hasMenu = trashed ? board.role === "owner" : canEditBoard(board.role);
 
   return (
     <div className="group relative flex h-full flex-col rounded-lg border border-border bg-bg shadow-card" aria-busy={pending}>
@@ -48,8 +50,13 @@ export function BoardCard({ board, trashed }: { board: BoardListItem; trashed: b
             </Link>
           )}
           <p className="text-xs text-text-muted">
-            {t.dash.edited} {fmt.format(new Date(board.updatedAt))}
+            {trashed && board.deletedAt ? t.dash.purgeIn(daysUntilPurge(board.deletedAt)) : `${t.dash.edited} ${fmt.format(new Date(board.updatedAt))}`}
           </p>
+          {error && (
+            <p role="alert" className="text-xs text-danger">
+              {t.dash.duplicateFailed}
+            </p>
+          )}
         </div>
         {!trashed && (
           <button
@@ -61,7 +68,7 @@ export function BoardCard({ board, trashed }: { board: BoardListItem; trashed: b
             <Star size={16} aria-hidden className={board.starred ? "fill-current text-warning" : "text-text-muted"} />
           </button>
         )}
-        {isOwner && (
+        {hasMenu && (
           <div className="relative z-10">
             <button
               aria-label="Действия с доской"
@@ -82,9 +89,27 @@ export function BoardCard({ board, trashed }: { board: BoardListItem; trashed: b
                   </li>
                 ) : (
                   <>
+                    {isOwner && (
+                      <li role="none">
+                        <button role="menuitem" className="w-full rounded-sm px-3 py-2 text-left hover:bg-surface-hover" onClick={() => { setMenu(false); setEditing(true); }}>
+                          {t.dash.rename}
+                        </button>
+                      </li>
+                    )}
                     <li role="none">
-                      <button role="menuitem" className="w-full rounded-sm px-3 py-2 text-left hover:bg-surface-hover" onClick={() => { setMenu(false); setEditing(true); }}>
-                        {t.dash.rename}
+                      <button
+                        role="menuitem"
+                        className="w-full rounded-sm px-3 py-2 text-left hover:bg-surface-hover"
+                        onClick={() => {
+                          setMenu(false);
+                          setError(false);
+                          start(async () => {
+                            const res = await duplicateBoard(board.id).catch(() => ({ ok: false as const }));
+                            if (!res.ok) setError(true);
+                          });
+                        }}
+                      >
+                        {t.dash.duplicate}
                       </button>
                     </li>
                     {board.role === "owner" && (

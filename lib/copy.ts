@@ -1,3 +1,9 @@
+const plural = (n: number, one: string, few: string, many: string) => {
+  const d = n % 10;
+  const h = n % 100;
+  return d === 1 && h !== 11 ? one : d >= 2 && d <= 4 && (h < 12 || h > 14) ? few : many;
+};
+
 // Every user-facing string in one place. Written fresh for Mysl; replica-brand rewrites these in the brand voice.
 export const t = {
   product: "Мысль",
@@ -120,6 +126,10 @@ export const t = {
     unstar: "Убрать из избранного",
     delete: "В корзину",
     restore: "Восстановить",
+    duplicate: "Дублировать",
+    copyName: (name: string) => `${name.slice(0, 60 - " (копия)".length).trimEnd()} (копия)`,
+    duplicateFailed: "Не получилось сделать копию. Попробуйте ещё раз.",
+    purgeIn: (days: number) => (days <= 0 ? "Удалится сегодня" : `Удалится через ${days} ${plural(days, "день", "дня", "дней")}`),
     edited: "Изменена",
     signOut: "Выйти",
     billing: "Тариф",
@@ -242,6 +252,29 @@ export const t = {
     error: "Не отправилось. Попробуйте ещё раз.",
     readOnly: "Комментировать могут участники с доступом к комментариям.",
     mentions: (n: number) => (n === 1 ? "1 новое упоминание" : `Новых упоминаний: ${n}`),
+  },
+  notifications: {
+    open: "Уведомления",
+    unread: (n: number) => `Уведомления, непрочитанных: ${n}`,
+    title: "Уведомления",
+    readAll: "Прочитать все",
+    empty: "Здесь появятся упоминания и приглашения на доски.",
+    loading: "Загружаем…",
+    failed: "Не получилось загрузить уведомления.",
+    mention: (who: string, board: string) => `${who || "Кто-то"} упоминает вас на доске «${board}»`,
+    invite: (who: string, board: string) => `${who || "Кто-то"} добавляет вас на доску «${board}»`,
+    unreadMark: "не прочитано",
+  },
+  email: {
+    roles: { editor: "можно редактировать", commenter: "можно комментировать", viewer: "можно смотреть" },
+    inviteSubject: (who: string, board: string) => `${who} приглашает вас на доску «${board}»`,
+    inviteBody: (who: string, board: string, role: string) => `${who} открывает вам доску «${board}» в Мысли. Вам ${role}.`,
+    inviteSignIn: "Если вы ещё не заходили в Мысль, войдите с этим адресом почты, и доска появится в вашем списке.",
+    inviteLink: "Открыть доску",
+    mentionSubject: (who: string, board: string) => `${who} упоминает вас на доске «${board}»`,
+    mentionBody: (who: string, board: string) => `${who} упоминает вас в комментарии на доске «${board}»:`,
+    mentionLink: "Ответить на доске",
+    footer: "Это письмо от Мысли: вас добавили на доску или упомянули в ней.",
   },
   board: {
     back: "Все доски",

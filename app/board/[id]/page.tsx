@@ -33,6 +33,6 @@ export default async function BoardPage({ params }: { params: Promise<{ id: stri
     );
   }
 
-  await data.markOpened(user.id, id);
-  return <BoardClient board={{ id: board.id, name: board.name, linkAccess: board.linkAccess }} role={role} user={{ id: user.id, name: user.name }} />;
+  const [, unread] = await Promise.all([data.markOpened(user.id, id), data.unreadNotifications(user.id)]);
+  return <BoardClient board={{ id: board.id, name: board.name, linkAccess: board.linkAccess }} role={role} user={{ id: user.id, name: user.name }} unread={unread} />;
 }
