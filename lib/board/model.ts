@@ -4,7 +4,8 @@ import { nanoid } from "nanoid";
 import { DEFAULT_STICKY } from "./palette";
 
 export type ShapeKind = "rect" | "round" | "ellipse" | "triangle" | "diamond";
-export type Route = "straight" | "elbow";
+export type Route = "straight" | "elbow" | "curved";
+export type TextStyle = "bold" | "italic" | "underline";
 
 interface Base {
   id: string;
@@ -14,6 +15,7 @@ interface Base {
   h: number;
   z: number;
   locked?: boolean;
+  groupId?: string; // items with the same group id select, move and delete together
   createdBy: string;
   updatedAt: number;
 }
@@ -30,6 +32,9 @@ export interface TextItem extends Base {
   fontSize: number;
   color: string;
   fixedWidth?: boolean; // set once someone resizes it; until then it grows with the text
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
 }
 
 export interface ShapeItem extends Base {
@@ -100,13 +105,17 @@ export function readItem(m: Y.Map<unknown>): Item {
 }
 
 /** Frames always sit under everything else; otherwise by z. */
+export function sortItems(list: Item[]): Item[] {
+  return list.sort((a, b) => Number(b.type === "frame") - Number(a.type === "frame") || a.z - b.z || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
 export function readAll(doc: Y.Doc): Item[] {
   const out: Item[] = [];
   itemsMap(doc).forEach((m) => out.push(readItem(m)));
-  return out.sort((a, b) => Number(b.type === "frame") - Number(a.type === "frame") || a.z - b.z || a.id.localeCompare(b.id));
+  return sortItems(out);
 }
 
-function topZ(doc: Y.Doc): number {
+export function topZ(doc: Y.Doc): number {
   let z = 0;
   itemsMap(doc).forEach((m) => {
     z = Math.max(z, (m.get("z") as number) ?? 0);
@@ -126,6 +135,12 @@ export function addItem<T extends Item>(doc: Y.Doc, item: NewItem<T>, userId: st
   const full = { ...item, id: nanoid(12), z: topZ(doc) + 1, createdBy: userId, updatedAt: Date.now() } as T;
   doc.transact(() => itemsMap(doc).set(full.id, toYMap(full)));
   return full;
+}
+
+/** Writes complete items (ids and z already set) in one transaction: one undo step, one network update. */
+export function insertItems(doc: Y.Doc, list: Item[]) {
+  const items = itemsMap(doc);
+  doc.transact(() => list.forEach((i) => items.set(i.id, toYMap(i))));
 }
 
 export function addSticky(doc: Y.Doc, at: { x: number; y: number }, userId: string, opts: { color?: string; text?: string } = {}): StickyItem {
@@ -150,7 +165,8 @@ export function updateItems(doc: Y.Doc, changes: { id: string; patch: Patch }[])
     for (const { id, patch } of changes) {
       const m = items.get(id);
       if (!m) continue;
-      for (const [k, v] of Object.entries(patch)) m.set(k, v);
+      // undefined clears a field (ungroup, plain text style)
+      for (const [k, v] of Object.entries(patch)) (v === undefined ? m.delete(k) : m.set(k, v));
       m.set("updatedAt", Date.now());
     }
   });
@@ -175,12 +191,19 @@ export function duplicateItems(doc: Y.Doc, ids: string[], userId: string, offset
   let z = topZ(doc);
   const idMap = new Map<string, string>();
   ids.forEach((id) => items.has(id) && idMap.set(id, nanoid(12)));
+  const groupMap = new Map<string, string>();
+  const regroup = (g: string) => {
+    if (!groupMap.has(g)) groupMap.set(g, nanoid(12));
+    return groupMap.get(g)!;
+  };
   const moveEnd = (e: End): End =>
     e.itemId ? (idMap.has(e.itemId) ? { ...e, itemId: idMap.get(e.itemId) } : { x: e.x + offset, y: e.y + offset }) : { x: e.x + offset, y: e.y + offset };
   doc.transact(() => {
     for (const [oldId, newId] of idMap) {
       const src = readItem(items.get(oldId)!);
       const copy = { ...src, id: newId, x: src.x + offset, y: src.y + offset, z: ++z, createdBy: userId, updatedAt: Date.now() } as Item;
+      // The copy of a group is a new group of its own.
+      if (src.groupId) copy.groupId = regroup(src.groupId);
       if (copy.type === "connector") {
         copy.from = moveEnd(copy.from);
         copy.to = moveEnd(copy.to);
@@ -189,6 +212,43 @@ export function duplicateItems(doc: Y.Doc, ids: string[], userId: string, offset
     }
   });
   return [...idMap.values()];
+}
+
+// ---------- groups ----------
+
+/** Groups two or more items under a fresh group id (an item already in a group moves to the new one). */
+export function groupItems(doc: Y.Doc, ids: string[]): string | null {
+  const present = ids.filter((id) => itemsMap(doc).has(id));
+  if (present.length < 2) return null;
+  const groupId = nanoid(12);
+  updateItems(doc, present.map((id) => ({ id, patch: { groupId } })));
+  return groupId;
+}
+
+/** Dissolves every group that one of `ids` belongs to. */
+export function ungroupItems(doc: Y.Doc, ids: string[]) {
+  const items = itemsMap(doc);
+  const groups = new Set(ids.map((id) => items.get(id)?.get("groupId") as string | undefined).filter(Boolean));
+  const members: string[] = [];
+  items.forEach((m, id) => groups.has(m.get("groupId") as string) && members.push(id));
+  updateItems(doc, members.map((id) => ({ id, patch: { groupId: undefined } })));
+}
+
+/** The ids plus every other member of their groups: a group is picked as a whole. */
+export function withGroups(items: Item[], ids: string[]): string[] {
+  const wanted = new Set(ids);
+  const groups = new Set<string>();
+  for (const i of items) if (i.groupId && wanted.has(i.id)) groups.add(i.groupId);
+  if (groups.size === 0) return ids;
+  const out = new Set(ids);
+  items.forEach((i) => i.groupId && groups.has(i.groupId) && out.add(i.id));
+  return [...out];
+}
+
+/** Toggling a style on several text items: on for all unless all already have it. */
+export function nextStyle(list: Item[], key: TextStyle): boolean {
+  const texts = list.filter((i): i is TextItem => i.type === "text");
+  return !(texts.length > 0 && texts.every((i) => i[key]));
 }
 
 export function bringToFront(doc: Y.Doc, ids: string[]) {
@@ -239,6 +299,7 @@ export function connectorPoints(c: ConnectorItem, lookup: (id: string) => Box | 
   const a: Anchor = fb ? anchorOn(fb, tRef) : { x: c.from.x, y: c.from.y };
   const b: Anchor = tb ? anchorOn(tb, fRef) : { x: c.to.x, y: c.to.y };
   if (c.route === "straight") return [a.x, a.y, b.x, b.y];
+  if (c.route === "curved") return curve(a, b);
   // Elbow: leave and arrive perpendicular to the side when attached.
   const horizontalStart = a.side ? a.side === "left" || a.side === "right" : Math.abs(b.x - a.x) >= Math.abs(b.y - a.y);
   if (horizontalStart) {
@@ -247,6 +308,29 @@ export function connectorPoints(c: ConnectorItem, lookup: (id: string) => Box | 
   }
   const my = (a.y + b.y) / 2;
   return [a.x, a.y, a.x, my, b.x, my, b.x, b.y];
+}
+
+const SIDE_DIR: Record<Side, { x: number; y: number }> = { left: { x: -1, y: 0 }, right: { x: 1, y: 0 }, top: { x: 0, y: -1 }, bottom: { x: 0, y: 1 } };
+
+/** A smooth S-curve that leaves and arrives perpendicular to the sides it is attached to, sampled as a polyline. */
+function curve(a: Anchor, b: Anchor, segments = 24): number[] {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const reach = Math.max(40, Math.hypot(dx, dy) * 0.4);
+  const horizontal = Math.abs(dx) >= Math.abs(dy);
+  const free = (sx: number, sy: number) => (horizontal ? { x: Math.sign(sx) || 1, y: 0 } : { x: 0, y: Math.sign(sy) || 1 });
+  const da = a.side ? SIDE_DIR[a.side] : free(dx, dy);
+  const db = b.side ? SIDE_DIR[b.side] : free(-dx, -dy);
+  const c1 = { x: a.x + da.x * reach, y: a.y + da.y * reach };
+  const c2 = { x: b.x + db.x * reach, y: b.y + db.y * reach };
+  const out: number[] = [];
+  for (let k = 0; k <= segments; k++) {
+    const t = k / segments;
+    const u = 1 - t;
+    const w0 = u * u * u, w1 = 3 * u * u * t, w2 = 3 * u * t * t, w3 = t * t * t;
+    out.push(w0 * a.x + w1 * c1.x + w2 * c2.x + w3 * b.x, w0 * a.y + w1 * c1.y + w2 * c2.y + w3 * b.y);
+  }
+  return out;
 }
 
 export function bboxOfPoints(points: number[]): Box {
@@ -293,5 +377,39 @@ export function simplify(points: number[], eps = 1.2): number[] {
 export function itemsInside(frame: Box, items: Item[], exclude: string): string[] {
   return items
     .filter((i) => i.id !== exclude && i.type !== "connector" && i.x >= frame.x && i.y >= frame.y && i.x + i.w <= frame.x + frame.w && i.y + i.h <= frame.y + frame.h)
+    .map((i) => i.id);
+}
+
+// ---------- lasso ----------
+
+/** Even-odd test: is the point inside the closed polygon given as flat x,y pairs? */
+export function pointInPolygon(p: { x: number; y: number }, poly: number[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 2; i < poly.length; j = i, i += 2) {
+    const xi = poly[i], yi = poly[i + 1], xj = poly[j], yj = poly[j + 1];
+    if (yi > p.y !== yj > p.y && p.x < ((xj - xi) * (p.y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/** Items a freehand lasso picks: those whose centre it encloses; a frame only when it encloses the whole frame. */
+export function lassoHits(items: Item[], poly: number[]): string[] {
+  if (poly.length < 6) return [];
+  const bb = bboxOfPoints(poly);
+  return items
+    .filter((i) => {
+      if (i.type === "connector") return false;
+      if (i.x > bb.x + bb.w || i.y > bb.y + bb.h || i.x + i.w < bb.x || i.y + i.h < bb.y) return false;
+      if (i.type === "frame") {
+        const corners = [
+          { x: i.x, y: i.y },
+          { x: i.x + i.w, y: i.y },
+          { x: i.x, y: i.y + i.h },
+          { x: i.x + i.w, y: i.y + i.h },
+        ];
+        return corners.every((c) => pointInPolygon(c, poly));
+      }
+      return pointInPolygon({ x: i.x + i.w / 2, y: i.y + i.h / 2 }, poly);
+    })
     .map((i) => i.id);
 }

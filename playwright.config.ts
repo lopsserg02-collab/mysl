@@ -1,8 +1,9 @@
 import { defineConfig } from "@playwright/test";
 
-// E2E_PORT runs the suite on its own web and realtime ports, so two checkouts can test side by side.
+// E2E_PORT / E2E_RT_PORT let several checkouts run their suites side by side; defaults match `npm run dev`.
 const port = Number(process.env.E2E_PORT ?? 3000);
-const rtPort = port === 3000 ? 1234 : port + 1;
+const rtPort = Number(process.env.E2E_RT_PORT ?? 1234);
+const custom = port !== 3000 || rtPort !== 1234;
 
 export default defineConfig({
   testDir: "e2e",
@@ -20,11 +21,8 @@ export default defineConfig({
     },
   },
   webServer: {
-    command:
-      port === 3000
-        ? "npm run dev"
-        : `npx concurrently -k -n web,rt "next dev -p ${port}" "tsx watch server/realtime.ts"`,
-    env: port === 3000 ? {} : { REALTIME_PORT: String(rtPort), NEXT_PUBLIC_REALTIME_URL: `ws://localhost:${rtPort}` },
+    command: custom ? `concurrently -k -n web,rt "next dev -p ${port}" "tsx server/realtime.ts"` : "npm run dev",
+    env: custom ? { REALTIME_PORT: String(rtPort), NEXT_PUBLIC_REALTIME_URL: `ws://localhost:${rtPort}` } : {},
     url: `http://localhost:${port}/login`,
     reuseExistingServer: true,
     timeout: 120_000,

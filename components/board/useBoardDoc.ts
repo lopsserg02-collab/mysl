@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import * as Y from "yjs";
 import { IndexeddbPersistence } from "y-indexeddb";
 import { HocuspocusProvider } from "@hocuspocus/provider";
-import { itemsMap, readAll, type Item } from "@/lib/board/model";
+import { itemsMap, readItem, sortItems, type Item } from "@/lib/board/model";
 import { colorForUser } from "@/lib/board/palette";
 
 export type ConnStatus = "connecting" | "connected" | "offline";
@@ -61,23 +61,69 @@ export function useBoardDoc(boardId: string, user: { id: string; name: string })
     const color = colorForUser(user.id);
     p.awareness?.setLocalStateField("user", { userId: user.id, name: user.name, color });
 
+    let lastPeers = "[]";
     const readPeers = () => {
       const out: Peer[] = [];
       p.awareness?.getStates().forEach((s, clientId) => {
         if (clientId === doc.clientID || !s.user) return;
         out.push({ clientId, ...s.user, cursor: s.cursor ?? null, selection: s.selection ?? [] });
       });
+      // Our own cursor changes the awareness too; only re-render when someone else changed.
+      const key = JSON.stringify(out);
+      if (key === lastPeers) return;
+      lastPeers = key;
       setPeers(out);
     };
     p.awareness?.on("change", readPeers);
 
-    const sync = () => setItems(readAll(doc));
-    itemsMap(doc).observeDeep(sync);
+    // Re-read only the items an update touched; untouched items keep their object, so their views skip rendering.
+    const map = itemsMap(doc);
+    const cache = new Map<string, Item>();
+    let order: Item[] = [];
+    const index = new Map<string, number>(); // position of each item in `order`
+    const resort = () => {
+      order = sortItems([...cache.values()]);
+      index.clear();
+      order.forEach((i, k) => index.set(i.id, k));
+    };
+    const sync = (events?: Y.YEvent<Y.AbstractType<unknown>>[]) => {
+      if (!events) {
+        cache.clear();
+        map.forEach((m, id) => cache.set(id, readItem(m)));
+        resort();
+      } else {
+        const touched = new Set<string>();
+        for (const ev of events) {
+          if (ev.target === map) ev.changes.keys.forEach((_, k) => touched.add(k));
+          else if (typeof ev.path[0] === "string") touched.add(ev.path[0]);
+        }
+        // Most edits (move, text, colour) keep every item's place in the stacking order: swap the objects in place.
+        let inPlace = true;
+        const next = order.slice();
+        touched.forEach((id) => {
+          const m = map.get(id);
+          const before = cache.get(id);
+          if (!m) {
+            cache.delete(id);
+            inPlace = false;
+            return;
+          }
+          const item = readItem(m);
+          cache.set(id, item);
+          if (!before || before.z !== item.z || before.type !== item.type) inPlace = false;
+          else next[index.get(id)!] = item;
+        });
+        if (inPlace) order = next;
+        else resort();
+      }
+      setItems(order);
+    };
+    map.observeDeep(sync);
     sync();
     setProvider(p);
 
     return () => {
-      itemsMap(doc).unobserveDeep(sync);
+      map.unobserveDeep(sync);
       p.awareness?.off("change", readPeers);
       p.destroy();
       local.destroy();

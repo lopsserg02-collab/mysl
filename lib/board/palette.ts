@@ -15,6 +15,12 @@ export const CANVAS = {
   grid: tokens.color["canvas-grid"],
   selection: tokens.color.selection,
   handle: tokens.color["selection-handle"],
+  lassoFill: tokens.alpha["lasso-fill"],
+  selectionFill: tokens.alpha["selection-fill"],
+  shadow: tokens.color.text,
+  placeholder: tokens.color["surface-hover"],
+  placeholderFailed: tokens.color["danger-subtle"],
+  placeholderBorder: tokens.color.border,
 };
 
 export const ZOOM = tokens.zoom;
