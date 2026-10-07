@@ -1,6 +1,8 @@
 // Shapes match replica/schema.sql so the Supabase implementation can replace the local one
 // without any screen code changing.
 
+import type { PlanId, SubscriptionStatus } from "../plans";
+
 export type BoardRole = "owner" | "coowner" | "editor" | "commenter" | "viewer";
 export type LinkAccess = "private" | "view" | "comment" | "edit";
 
@@ -74,6 +76,36 @@ export interface Asset {
 
 export type BoardSort = "opened" | "modified" | "name";
 
+/** A person's billing state. Written only from verified Stripe webhooks, never from the browser. */
+export interface Subscription {
+  userId: string;
+  plan: PlanId;
+  status: SubscriptionStatus;
+  stripeCustomerId: string | null;
+  stripeSubscriptionId: string | null;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+}
+
+export type SubscriptionPatch = Partial<Omit<Subscription, "userId">>;
+
+/** What a board uses against its owner's plan. */
+export interface BoardUsage {
+  ownerId: string;
+  ownerSubscription: Subscription | null;
+  /** Everyone besides the owner who can edit, plus pending editor invites. Emails are lower case. */
+  editors: { userId: string | null; email: string }[];
+  /** Bytes of all uploads on every board the owner has, trash included. */
+  storageBytes: number;
+}
+
+/** Billing writes inside one Stripe event's transaction. */
+export interface BillingWriter {
+  userIdForCustomer(customerId: string): Promise<string | null>;
+  getSubscription(userId: string): Promise<Subscription | null>;
+  saveSubscription(userId: string, patch: SubscriptionPatch & { eventAt: string }): Promise<"saved" | "stale">;
+}
+
 export interface DataLayer {
   upsertUserByEmail(email: string, name: string): Promise<User>;
   getUser(id: string): Promise<User | null>;
@@ -93,8 +125,8 @@ export interface DataLayer {
   setMemberRole(userId: string, boardId: string, memberId: string, role: ShareRole | null): Promise<void>;
   cancelInvite(userId: string, boardId: string, email: string): Promise<void>;
   setLinkAccess(userId: string, boardId: string, access: LinkAccess): Promise<void>;
-  /** A signed-in person opening a board shared by link joins it with the link's role. */
-  joinViaLink(userId: string, boardId: string): Promise<BoardRole | null>;
+  /** A signed-in person opening a board shared by link joins it with the link's role. maxRole caps an edit link (the plan's editor limit). */
+  joinViaLink(userId: string, boardId: string, opts?: { maxRole?: "commenter" | "viewer" }): Promise<BoardRole | null>;
   // Comments (S09): anyone on the board reads them; commenters and up write. Mentions notify people on the board.
   listThreads(userId: string, boardId: string): Promise<CommentThread[]>;
   createThread(userId: string, boardId: string, at: { x: number; y: number; itemId?: string | null }, body: string, mentions?: string[]): Promise<CommentThread>;
@@ -105,6 +137,13 @@ export interface DataLayer {
   // Images: editors upload; anyone who can see the board can fetch them.
   createAsset(userId: string, asset: Omit<Asset, "id">): Promise<Asset>;
   getAsset(userId: string, assetId: string): Promise<Asset | null>;
+  // Billing. getSubscription reads the person's own row. The rest are server-side only (service connection):
+  // callers check access first, and nothing here takes plan or status from the browser.
+  getSubscription(userId: string): Promise<Subscription | null>;
+  boardUsage(boardId: string): Promise<BoardUsage | null>;
+  setStripeCustomer(userId: string, customerId: string): Promise<void>;
+  /** Runs apply once per Stripe event id, atomically with recording the id. Returns false for an event seen before. */
+  applyStripeEvent(event: { id: string; type: string }, apply: (w: BillingWriter) => Promise<void>): Promise<boolean>;
 }
 
 export const canEditBoard = (r: BoardRole | null) => r === "owner" || r === "coowner" || r === "editor";

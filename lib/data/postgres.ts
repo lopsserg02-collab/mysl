@@ -3,7 +3,7 @@
 // so the row level security policies in db/migrations decide what each person can see and change.
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
-import { AccessError, type Board, type BoardListItem, type BoardRole, type DataLayer, type Asset, type Comment, type CommentThread, type Person, type User } from "./types";
+import { AccessError, type Board, type BoardListItem, type BoardRole, type DataLayer, type Asset, type Comment, type CommentThread, type Person, type User, type BillingWriter, type Subscription } from "./types";
 
 type Sql = postgres.Sql;
 type Tx = postgres.TransactionSql;
@@ -183,9 +183,10 @@ export const postgresData: DataLayer = {
     if (n.count === 0) throw new AccessError();
   },
 
-  async joinViaLink(userId, boardId) {
+  async joinViaLink(userId, boardId, opts = {}) {
     if (!UUID.test(boardId)) return null;
-    const [row] = await asUser(userId, (tx) => tx<{ role: BoardRole | null }[]>`select join_board_via_link(${boardId}) as role`);
+    const cap = opts.maxRole ?? null;
+    const [row] = await asUser(userId, (tx) => tx<{ role: BoardRole | null }[]>`select join_board_via_link(${boardId}, ${cap}::text) as role`);
     return row?.role ?? null;
   },
 
@@ -249,7 +250,95 @@ export const postgresData: DataLayer = {
       select a.* from assets a join boards b on b.id = a.board_id where a.id = ${assetId} and b.deleted_at is null`);
     return r ? { id: r.id, boardId: r.board_id, storagePath: r.storage_path, mime: r.mime, bytes: r.bytes, width: r.width, height: r.height } : null;
   },
+
+  async getSubscription(userId) {
+    if (!UUID.test(userId)) return null;
+    // Row level security: a person reads only their own row.
+    const [r] = await asUser(userId, (tx) => tx<SubscriptionRow[]>`select * from subscriptions where user_id = ${userId}`);
+    return r ? toSubscription(r) : null;
+  },
+
+  async boardUsage(boardId) {
+    if (!UUID.test(boardId)) return null;
+    // Service connection: the caller already checked access, and counts cross other people's rows.
+    const db = sql();
+    const [b] = await db<{ owner_id: string }[]>`select owner_id from boards where id = ${boardId}`;
+    if (!b) return null;
+    const [sub] = await db<SubscriptionRow[]>`select * from subscriptions where user_id = ${b.owner_id}`;
+    const editors = await db<{ user_id: string | null; email: string }[]>`
+      select m.user_id, lower(p.email) as email from board_members m join profiles p on p.id = m.user_id
+       where m.board_id = ${boardId} and m.role in ('coowner', 'editor')
+      union all
+      select null, lower(i.email) from board_invites i where i.board_id = ${boardId} and i.accepted_at is null and i.role = 'editor'`;
+    const [st] = await db<{ n: string }[]>`select coalesce(sum(a.bytes), 0)::text as n from assets a join boards x on x.id = a.board_id where x.owner_id = ${b.owner_id}`;
+    return {
+      ownerId: b.owner_id,
+      ownerSubscription: sub ? toSubscription(sub) : null,
+      editors: editors.map((e) => ({ userId: e.user_id, email: e.email })),
+      storageBytes: Number(st.n),
+    };
+  },
+
+  async setStripeCustomer(userId, customerId) {
+    await sql()`insert into subscriptions (user_id, stripe_customer_id) values (${userId}, ${customerId})
+      on conflict (user_id) do update set stripe_customer_id = excluded.stripe_customer_id, updated_at = now()`;
+  },
+
+  async applyStripeEvent(event, apply) {
+    return (await sql().begin(async (tx) => {
+      const seen = await tx`insert into stripe_events (id, type) values (${event.id}, ${event.type}) on conflict (id) do nothing returning id`;
+      if (seen.length === 0) return false;
+      const writer: BillingWriter = {
+        async userIdForCustomer(customerId) {
+          const [r] = await tx<{ user_id: string }[]>`select user_id from subscriptions where stripe_customer_id = ${customerId}`;
+          return r?.user_id ?? null;
+        },
+        async getSubscription(userId) {
+          const [r] = await tx<SubscriptionRow[]>`select * from subscriptions where user_id = ${userId}`;
+          return r ? toSubscription(r) : null;
+        },
+        async saveSubscription(userId, { eventAt, ...p }) {
+          // Row lock, then skip changes older than the last one applied (Stripe does not order deliveries).
+          await tx`insert into subscriptions (user_id) values (${userId}) on conflict (user_id) do nothing`;
+          const [cur] = await tx<{ last_event_at: Date | null }[]>`select last_event_at from subscriptions where user_id = ${userId} for update`;
+          if (cur.last_event_at && cur.last_event_at.toISOString() > eventAt) return "stale";
+          const cols: Record<string, unknown> = { last_event_at: eventAt, updated_at: new Date().toISOString() };
+          if (p.plan !== undefined) cols.plan = p.plan;
+          if (p.status !== undefined) cols.status = p.status;
+          if (p.stripeCustomerId !== undefined) cols.stripe_customer_id = p.stripeCustomerId;
+          if (p.stripeSubscriptionId !== undefined) cols.stripe_subscription_id = p.stripeSubscriptionId;
+          if (p.currentPeriodEnd !== undefined) cols.current_period_end = p.currentPeriodEnd;
+          if (p.cancelAtPeriodEnd !== undefined) cols.cancel_at_period_end = p.cancelAtPeriodEnd;
+          await tx`update subscriptions set ${tx(cols)} where user_id = ${userId}`;
+          return "saved";
+        },
+      };
+      // Any error rolls back the event id too, so Stripe's retry runs the handler again.
+      await apply(writer);
+      return true;
+    })) as boolean;
+  },
 };
+
+interface SubscriptionRow {
+  user_id: string;
+  stripe_customer_id: string | null;
+  stripe_subscription_id: string | null;
+  plan: Subscription["plan"];
+  status: Subscription["status"];
+  current_period_end: Date | null;
+  cancel_at_period_end: boolean;
+}
+
+const toSubscription = (r: SubscriptionRow): Subscription => ({
+  userId: r.user_id,
+  plan: r.plan,
+  status: r.status,
+  stripeCustomerId: r.stripe_customer_id,
+  stripeSubscriptionId: r.stripe_subscription_id,
+  currentPeriodEnd: r.current_period_end?.toISOString() ?? null,
+  cancelAtPeriodEnd: r.cancel_at_period_end,
+});
 
 interface CommentRow {
   thread_id: string;

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Plus, Search, Star, Trash2, LayoutGrid, LogOut } from "lucide-react";
+import { Plus, Search, Star, Trash2, LayoutGrid, LogOut, CreditCard } from "lucide-react";
 import { data, type BoardSort } from "@/lib/data";
 import { requireUser } from "@/lib/session";
 import { t } from "@/lib/copy";
@@ -42,7 +42,11 @@ export default async function Dashboard({
         {tab("all", t.dash.all, LayoutGrid)}
         {tab("starred", t.dash.starred, Star)}
         {tab("trash", t.dash.trash, Trash2)}
-        <form action={signOut} className="ml-auto md:ml-0 md:mt-auto">
+        <Link href="/account/billing" className="ml-auto flex h-10 items-center gap-2 rounded-md px-3 text-text-muted hover:bg-surface-hover md:ml-0 md:mt-auto">
+          <CreditCard size={16} aria-hidden /> <span className="hidden md:inline">{t.dash.billing}</span>
+          <span className="sr-only md:hidden">{t.dash.billing}</span>
+        </Link>
+        <form action={signOut}>
           <button className="flex h-10 items-center gap-2 rounded-md px-3 text-text-muted hover:bg-surface-hover">
             <LogOut size={16} aria-hidden /> <span className="hidden md:inline">{t.dash.signOut}</span>
             <span className="sr-only md:hidden">{t.dash.signOut}</span>
