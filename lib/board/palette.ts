@@ -29,3 +29,8 @@ export function colorForUser(id: string) {
   for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return CURSOR_COLORS[h % CURSOR_COLORS.length];
 }
+
+// Ink for text, shape outlines, connectors and pens: the text colour plus the collaborator hues.
+export const INK = [tokens.color.text, ...CURSOR_COLORS.slice(0, 7).map((c) => c.fill)];
+export const DEFAULT_INK = INK[0];
+export const FRAME = { fill: tokens.color["frame-fill"], title: tokens.color["frame-title"], border: tokens.color.border };

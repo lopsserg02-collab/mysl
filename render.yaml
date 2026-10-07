@@ -1,0 +1,19 @@
+# Render blueprint for the realtime server (Hocuspocus over WebSocket). The web app runs on Vercel.
+# Secret values are entered in the Render dashboard, never here.
+services:
+  - type: web
+    name: mysl-realtime
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm run start:realtime
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATA_LAYER
+        value: postgres
+      - key: DATABASE_URL
+        sync: false
+      - key: REALTIME_SECRET
+        sync: false

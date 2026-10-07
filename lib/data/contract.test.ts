@@ -1,0 +1,156 @@
+// The same behaviour is required of every data layer. Postgres runs when TEST_DATABASE_URL is set.
+import { test, after } from "node:test";
+import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
+import { mkdtempSync } from "node:fs";
+import type { DataLayer } from "./types";
+
+process.env.DATA_DIR = mkdtempSync(path.join(os.tmpdir(), "mysl-data-"));
+const layers: [string, () => Promise<DataLayer>][] = [["local", async () => (await import("./local")).localData]];
+if (process.env.TEST_DATABASE_URL) {
+  process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
+  layers.push(["postgres", async () => (await import("./postgres")).postgresData]);
+  after(async () => (await import("./postgres")).closePostgres());
+}
+
+const uniq = () => Math.random().toString(36).slice(2, 10);
+
+for (const [name, load] of layers) {
+  test(`${name}: owner lifecycle and isolation from a second user`, async () => {
+    const data = await load();
+    const a = await data.upsertUserByEmail(`a-${uniq()}@example.com`, "Анна");
+    const b = await data.upsertUserByEmail(`b-${uniq()}@example.com`, "Борис");
+    assert.equal((await data.getUser(a.id))?.name, "Анна");
+
+    const board = await data.createBoard(a.id, "  План  ");
+    assert.equal(board.name, "План");
+    await data.createBoard(a.id, "Альфа");
+    assert.equal(await data.getRole(board.id, a.id), "owner");
+    assert.deepEqual((await data.listBoards(a.id, { sort: "name" })).map((x) => x.name), ["Альфа", "План"]);
+    assert.deepEqual((await data.listBoards(a.id, { q: "пла" })).map((x) => x.name), ["План"]);
+
+    // The second user sees and changes nothing
+    assert.equal(await data.getRole(board.id, b.id), null);
+    assert.deepEqual(await data.listBoards(b.id), []);
+    await assert.rejects(data.renameBoard(b.id, board.id, "взлом"));
+    await assert.rejects(data.setStarred(b.id, board.id, true));
+    await assert.rejects(data.trashBoard(b.id, board.id));
+
+    await data.renameBoard(a.id, board.id, "План запуска");
+    await data.setStarred(a.id, board.id, true);
+    assert.deepEqual((await data.listBoards(a.id, { starredOnly: true })).map((x) => x.name), ["План запуска"]);
+
+    await data.trashBoard(a.id, board.id);
+    assert.equal(await data.getRole(board.id, a.id), null);
+    assert.deepEqual((await data.listBoards(a.id, { trashed: true })).map((x) => x.id), [board.id]);
+    assert.equal((await data.listBoards(a.id)).length, 1);
+    await assert.rejects(data.restoreBoard(b.id, board.id));
+    await data.restoreBoard(a.id, board.id);
+    assert.equal(await data.getRole(board.id, a.id), "owner");
+  });
+}
+
+for (const [name, load] of layers) {
+  test(`${name}: sharing by email, by link, and who may change it`, async () => {
+    const data = await load();
+    const owner = await data.upsertUserByEmail(`o-${uniq()}@example.com`, "Ольга");
+    const editor = await data.upsertUserByEmail(`e-${uniq()}@example.com`, "Егор");
+    const stranger = await data.upsertUserByEmail(`s-${uniq()}@example.com`, "Света");
+    const board = await data.createBoard(owner.id, "Общая");
+
+    // An existing account joins at once; an unknown address waits as an invite.
+    assert.equal(await data.shareBoard(owner.id, board.id, editor.email.toUpperCase(), "editor"), "added");
+    assert.equal(await data.getRole(board.id, editor.id), "editor");
+    const later = `new-${uniq()}@example.com`;
+    assert.equal(await data.shareBoard(owner.id, board.id, later, "commenter"), "invited");
+    const people = await data.listPeople(editor.id, board.id);
+    assert.deepEqual(people.map((p) => [p.role, p.pending]), [["owner", false], ["editor", false], ["commenter", true]]);
+
+    // The invite becomes membership on sign-up.
+    const newcomer = await data.upsertUserByEmail(later, "Новенький");
+    assert.equal(await data.getRole(board.id, newcomer.id), "commenter");
+    assert.equal((await data.listPeople(owner.id, board.id)).filter((p) => p.pending).length, 0);
+
+    // Only owners and co-owners change access, and nobody changes the owner.
+    await assert.rejects(data.shareBoard(editor.id, board.id, stranger.email, "editor"));
+    await assert.rejects(data.setMemberRole(editor.id, board.id, newcomer.id, "editor"));
+    await assert.rejects(data.setLinkAccess(editor.id, board.id, "edit"));
+    await assert.rejects(data.setMemberRole(owner.id, board.id, owner.id, "viewer"));
+    await assert.rejects(data.listPeople(stranger.id, board.id));
+    await data.setMemberRole(owner.id, board.id, editor.id, "viewer");
+    assert.equal(await data.getRole(board.id, editor.id), "viewer");
+    await data.setMemberRole(owner.id, board.id, editor.id, null);
+    assert.equal(await data.getRole(board.id, editor.id), null);
+
+    // Pending invites can be withdrawn.
+    const nobody = `nobody-${uniq()}@example.com`;
+    await data.shareBoard(owner.id, board.id, nobody, "viewer");
+    await data.cancelInvite(owner.id, board.id, nobody);
+    assert.ok(!(await data.listPeople(owner.id, board.id)).some((p) => p.email === nobody));
+
+    // Link access: off by default, then anyone signed in joins with the link's role.
+    assert.equal(await data.joinViaLink(stranger.id, board.id), null);
+    await data.setLinkAccess(owner.id, board.id, "comment");
+    assert.equal(await data.joinViaLink(stranger.id, board.id), "commenter");
+    assert.equal(await data.getRole(board.id, stranger.id), "commenter");
+    assert.equal(await data.joinViaLink(owner.id, board.id), "owner");
+    assert.ok((await data.listBoards(stranger.id)).some((b) => b.id === board.id));
+  });
+}
+
+for (const [name, load] of layers) {
+  test(`${name}: comments, replies, resolve, mentions, and who may write`, async () => {
+    const data = await load();
+    const owner = await data.upsertUserByEmail(`co-${uniq()}@example.com`, "Ольга");
+    const commenter = await data.upsertUserByEmail(`cc-${uniq()}@example.com`, "Костя");
+    const viewer = await data.upsertUserByEmail(`cv-${uniq()}@example.com`, "Вера");
+    const outsider = await data.upsertUserByEmail(`cx-${uniq()}@example.com`, "Хаким");
+    const board = await data.createBoard(owner.id, "Обсуждение");
+    await data.shareBoard(owner.id, board.id, commenter.email, "commenter");
+    await data.shareBoard(owner.id, board.id, viewer.email, "viewer");
+
+    const thread = await data.createThread(owner.id, board.id, { x: 10, y: 20, itemId: "sticky1" }, "  @Костя посмотри  ", [commenter.id, outsider.id, owner.id]);
+    assert.equal(thread.comments[0].body, "@Костя посмотри");
+    assert.equal(thread.comments[0].authorName, "Ольга");
+    // Only people on the board are notified, and never the author
+    assert.equal(await data.unreadMentions(commenter.id), 1);
+    assert.equal(await data.unreadMentions(outsider.id), 0);
+    assert.equal(await data.unreadMentions(owner.id), 0);
+
+    await data.replyToThread(commenter.id, thread.id, "Готово");
+    await data.setThreadResolved(commenter.id, thread.id, true);
+    const [read] = await data.listThreads(viewer.id, board.id);
+    assert.equal(read.itemId, "sticky1");
+    assert.equal(read.resolved, true);
+    assert.deepEqual(read.comments.map((c) => [c.authorName, c.body]), [["Ольга", "@Костя посмотри"], ["Костя", "Готово"]]);
+
+    // Viewers read but do not write; outsiders see nothing
+    await assert.rejects(data.createThread(viewer.id, board.id, { x: 0, y: 0 }, "нельзя"));
+    await assert.rejects(data.replyToThread(viewer.id, thread.id, "нельзя"));
+    await assert.rejects(data.setThreadResolved(viewer.id, thread.id, false));
+    await assert.rejects(data.listThreads(outsider.id, board.id));
+    await assert.rejects(data.replyToThread(outsider.id, thread.id, "нельзя"));
+    await assert.rejects(data.createThread(owner.id, board.id, { x: 0, y: 0 }, "   "));
+  });
+}
+
+for (const [name, load] of layers) {
+  test(`${name}: images: editors upload, viewers fetch, outsiders get nothing`, async () => {
+    const data = await load();
+    const owner = await data.upsertUserByEmail(`io-${uniq()}@example.com`, "Ирина");
+    const viewer = await data.upsertUserByEmail(`iv-${uniq()}@example.com`, "Влад");
+    const outsider = await data.upsertUserByEmail(`ix-${uniq()}@example.com`, "Хаким");
+    const board = await data.createBoard(owner.id, "Картинки");
+    await data.shareBoard(owner.id, board.id, viewer.email, "viewer");
+    const meta = { boardId: board.id, storagePath: `${board.id}/x.png`, mime: "image/png" as const, bytes: 10, width: 4, height: 3 };
+
+    const a = await data.createAsset(owner.id, meta);
+    assert.equal((await data.getAsset(viewer.id, a.id))?.storagePath, meta.storagePath);
+    assert.equal(await data.getAsset(outsider.id, a.id), null);
+    await assert.rejects(data.createAsset(viewer.id, { ...meta, storagePath: `${board.id}/y.png` }));
+    await assert.rejects(data.createAsset(outsider.id, { ...meta, storagePath: `${board.id}/z.png` }));
+    await data.trashBoard(owner.id, board.id);
+    assert.equal(await data.getAsset(owner.id, a.id), null);
+  });
+}
