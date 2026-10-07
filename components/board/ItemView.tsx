@@ -1,6 +1,6 @@
 "use client";
-import { memo } from "react";
-import { Group, Rect, Text, Ellipse, Line, Arrow } from "react-konva";
+import { memo, useEffect, useState } from "react";
+import { Group, Rect, Text, Ellipse, Line, Arrow, Image as KImage } from "react-konva";
 import { connectorPoints, type Box, type Item } from "@/lib/board/model";
 import { FRAME, stickyPair } from "@/lib/board/palette";
 import { FONT, PAD, fittedFontSize } from "./text";
@@ -69,6 +69,12 @@ export const ItemView = memo(function ItemView({ item: i, editing, scale, lookup
           />
         </Group>
       );
+    case "image":
+      return (
+        <Group id={`item-${i.id}`} itemId={i.id} x={i.x} y={i.y} onTransformEnd={onTransformEnd}>
+          <BoardImage src={i.src} w={i.w} h={i.h} />
+        </Group>
+      );
     case "frame":
       return (
         <Group id={`item-${i.id}`} itemId={i.id} x={i.x} y={i.y} onTransformEnd={onTransformEnd}>
@@ -110,6 +116,34 @@ export const ItemView = memo(function ItemView({ item: i, editing, scale, lookup
     }
   }
 });
+
+// Loaded images are shared between every view of the same picture.
+const cache = new Map<string, HTMLImageElement>();
+
+function BoardImage({ src, w, h }: { src: string; w: number; h: number }) {
+  const [img, setImg] = useState<HTMLImageElement | null>(() => (cache.get(src)?.complete ? cache.get(src)! : null));
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let el = cache.get(src);
+    if (!el) {
+      el = new window.Image();
+      el.src = src;
+      cache.set(src, el);
+    }
+    if (el.complete && el.naturalWidth) return setImg(el);
+    const ok = () => setImg(el!);
+    const bad = () => setFailed(true);
+    el.addEventListener("load", ok);
+    el.addEventListener("error", bad);
+    return () => {
+      el!.removeEventListener("load", ok);
+      el!.removeEventListener("error", bad);
+    };
+  }, [src]);
+  // Placeholder while loading (or if the file is gone) keeps the item visible and clickable.
+  if (!img) return <Rect width={w} height={h} fill={failed ? "#fde8e8" : "#eceef2"} stroke="#d0d5dd" strokeWidth={1} strokeScaleEnabled={false} />;
+  return <KImage image={img} width={w} height={h} />;
+}
 
 function BoxText({ item, color }: { item: Extract<Item, { type: "sticky" | "shape" }>; color: string }) {
   return (

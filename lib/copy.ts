@@ -68,6 +68,14 @@ export const t = {
     cancelInvite: "Отменить приглашение",
     memberRole: (name: string) => `Доступ для ${name}`,
   },
+  images: {
+    add: "Картинка",
+    uploading: "Загружаем картинку…",
+    tooLarge: "Файл больше 30 МБ. Уменьшите его и попробуйте снова.",
+    unsupported: "Подходят только PNG, JPEG, GIF и WebP.",
+    failed: "Картинка не загрузилась. Попробуйте ещё раз.",
+    untitled: "Картинка",
+  },
   comments: {
     tool: "Комментарий (C)",
     pin: (author: string, text: string) => `Комментарий ${author}: ${text}`,

@@ -5,13 +5,13 @@ import { Stage, Layer, Rect, Line, Arrow, Ellipse, Transformer } from "react-kon
 import type Konva from "konva";
 import {
   ArrowLeft, Hand, MousePointer2, StickyNote, Type, Square, Circle, Triangle, Diamond, RectangleHorizontal, MoveUpRight, Pen, Highlighter, Eraser, Frame,
-  Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Copy, Trash2, BringToFront, SendToBack, WifiOff, Lock, Unlock, CornerDownRight, ArrowRight, Share2, MessageCircle,
+  Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Copy, Trash2, BringToFront, SendToBack, WifiOff, Lock, Unlock, CornerDownRight, ArrowRight, Share2, MessageCircle, ImagePlus,
 } from "lucide-react";
 import { canComment, type BoardRole, type LinkAccess } from "@/lib/data/types";
 import { t } from "@/lib/copy";
 import {
-  addItem, addSticky, boxOf, bringToFront, deleteItems, duplicateItems, hasText, itemsInside, sendToBack, simplify, updateItems, bboxOfPoints,
-  type Box, type ConnectorItem, type DrawingItem, type End, type FrameItem, type Item, type Patch, type ShapeItem, type ShapeKind, type TextItem,
+  addItem, addSticky, boxOf, bringToFront, deleteItems, duplicateItems, fitImage, hasText, itemsInside, sendToBack, simplify, updateItems, bboxOfPoints,
+  type Box, type ConnectorItem, type DrawingItem, type End, type FrameItem, type ImageItem, type Item, type Patch, type ShapeItem, type ShapeKind, type TextItem,
 } from "@/lib/board/model";
 import { CANVAS, DEFAULT_INK, INK, STICKY_COLOR_NAMES, ZOOM, stickyPair } from "@/lib/board/palette";
 import { renameBoard } from "@/app/actions";
@@ -99,6 +99,65 @@ export function Board({ board, role, user }: { board: { id: string; name: string
   const fitAll = useCallback(() => setVp(fitTo(bounds(items.filter((i) => i.type !== "connector")), size)), [items, size]);
   const center = { x: size.w / 2, y: size.h / 2 };
   const pointer = () => stageRef.current?.getPointerPosition() ?? center;
+
+  // ---------- images: picker, paste, drop ----------
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const uploadImages = async (files: File[], at: Pt) => {
+    const images = files.filter((f) => /^image\/(png|jpeg|gif|webp)$/.test(f.type));
+    if (!canEdit) return;
+    if (images.length === 0) return files.length && setNotice(t.images.unsupported);
+    setNotice(t.images.uploading);
+    const added: string[] = [];
+    let error: string | null = null;
+    for (const [n, file] of images.entries()) {
+      if (file.size > 30 * 1024 * 1024) {
+        error = t.images.tooLarge;
+        continue;
+      }
+      // A file the browser cannot open as an image is not one, whatever its name says.
+      const dims = await imageSize(file).catch(() => null);
+      if (!dims) {
+        error = t.images.unsupported;
+        continue;
+      }
+      try {
+        const form = new FormData();
+        form.set("boardId", board.id);
+        form.set("file", file);
+        form.set("width", String(dims.width));
+        form.set("height", String(dims.height));
+        const res = await fetch("/api/assets", { method: "POST", body: form });
+        if (!res.ok) {
+          error = res.status === 413 ? t.images.tooLarge : res.status === 415 ? t.images.unsupported : t.images.failed;
+          continue;
+        }
+        const { id, src } = (await res.json()) as { id: string; src: string };
+        const { w, h } = fitImage(dims.width, dims.height);
+        const item = addItem<ImageItem>(doc, { type: "image", assetId: id, src, alt: file.name.replace(/\.[^.]+$/, "") || t.images.untitled, x: Math.round(at.x - w / 2 + n * 24), y: Math.round(at.y - h / 2 + n * 24), w, h }, user.id);
+        added.push(item.id);
+      } catch {
+        error = t.images.failed;
+      }
+    }
+    if (added.length) {
+      setSelected(added);
+      setTool("select");
+    }
+    setNotice(error);
+  };
+
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if ((e.target as HTMLElement).closest?.("input, textarea, [contenteditable=true], dialog")) return;
+      const files = [...(e.clipboardData?.files ?? [])];
+      if (files.length === 0) return;
+      e.preventDefault();
+      void uploadImages(files, toBoard(vp, center));
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  });
   const editable = (id: string) => canEdit && !byId.get(id)?.locked;
 
   // ---------- actions ----------
@@ -523,6 +582,15 @@ export function Board({ board, role, user }: { board: { id: string; name: string
       onPointerLeave={hideCursor}
       data-ready={ready || undefined}
       data-tool={tool}
+      onDragOver={(e) => {
+        if (canEdit && e.dataTransfer.types.includes("Files")) e.preventDefault();
+      }}
+      onDrop={(e) => {
+        if (!canEdit || e.dataTransfer.files.length === 0) return;
+        e.preventDefault();
+        const rect = e.currentTarget.getBoundingClientRect();
+        void uploadImages([...e.dataTransfer.files], toBoard(vp, { x: e.clientX - rect.left, y: e.clientY - rect.top }));
+      }}
     >
       <div
         aria-hidden
@@ -572,8 +640,8 @@ export function Board({ board, role, user }: { board: { id: string; name: string
                 ref={trRef}
                 rotateEnabled={false}
                 flipEnabled={false}
-                keepRatio={false}
-                enabledAnchors={single?.type === "text" ? ["middle-left", "middle-right"] : undefined}
+                keepRatio={single?.type === "image"}
+                enabledAnchors={single?.type === "text" ? ["middle-left", "middle-right"] : single?.type === "image" ? ["top-left", "top-right", "bottom-left", "bottom-right"] : undefined}
                 borderStroke={CANVAS.selection}
                 borderStrokeWidth={1.5}
                 anchorStroke={CANVAS.selection}
@@ -697,6 +765,27 @@ export function Board({ board, role, user }: { board: { id: string; name: string
           </button>
         </div>
       </header>
+      <input
+        ref={fileInput}
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp"
+        multiple
+        hidden
+        aria-label={t.images.add}
+        onChange={(e) => {
+          const files = [...(e.target.files ?? [])];
+          e.target.value = "";
+          void uploadImages(files, toBoard(vp, center));
+        }}
+      />
+      {notice && (
+        <div role="status" className="absolute bottom-16 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-md bg-bg px-3 py-2 text-sm shadow-pop">
+          {notice}
+          {notice !== t.images.uploading && (
+            <button type="button" aria-label={t.comments.close} onClick={() => setNotice(null)} className="text-text-muted hover:text-text">×</button>
+          )}
+        </div>
+      )}
       <Comments
         boardId={board.id}
         userId={user.id}
@@ -724,6 +813,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
             <ToolButton label={t.board.highlighter} active={tool === "highlighter"} onClick={() => setTool("highlighter")}><Highlighter size={20} /></ToolButton>
             <ToolButton label={t.board.eraser} active={tool === "eraser"} onClick={() => setTool("eraser")}><Eraser size={20} /></ToolButton>
             <ToolButton label={t.board.frame} active={tool === "frame"} onClick={() => setTool("frame")}><Frame size={20} /></ToolButton>
+            <ToolButton label={t.images.add} onClick={() => fileInput.current?.click()}><ImagePlus size={20} /></ToolButton>
             <div className="my-1 h-px shrink-0 bg-border" />
             <ToolButton label={t.board.undo} onClick={() => undo.undo()}><Undo2 size={20} /></ToolButton>
             <ToolButton label={t.board.redo} onClick={() => undo.redo()}><Redo2 size={20} /></ToolButton>
@@ -876,6 +966,8 @@ function describe(i: Item): string {
       return `Рисунок${i.highlighter ? " маркером" : ""}${lock}`;
     case "frame":
       return `Рамка: ${i.title || t.board.framePlaceholder}${lock}`;
+    case "image":
+      return `Картинка: ${i.alt}${lock}`;
   }
 }
 
@@ -1032,4 +1124,21 @@ function TextEditor({ item, vp, onChange, onDone }: { item: Extract<Item, { text
       }}
     />
   );
+}
+
+/** Natural size of an image file, read in the browser before upload. */
+function imageSize(file: File): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new window.Image();
+    img.onload = () => {
+      resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      URL.revokeObjectURL(url);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("not an image"));
+    };
+    img.src = url;
+  });
 }

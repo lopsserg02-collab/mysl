@@ -134,3 +134,23 @@ for (const [name, load] of layers) {
     await assert.rejects(data.createThread(owner.id, board.id, { x: 0, y: 0 }, "   "));
   });
 }
+
+for (const [name, load] of layers) {
+  test(`${name}: images: editors upload, viewers fetch, outsiders get nothing`, async () => {
+    const data = await load();
+    const owner = await data.upsertUserByEmail(`io-${uniq()}@example.com`, "Ирина");
+    const viewer = await data.upsertUserByEmail(`iv-${uniq()}@example.com`, "Влад");
+    const outsider = await data.upsertUserByEmail(`ix-${uniq()}@example.com`, "Хаким");
+    const board = await data.createBoard(owner.id, "Картинки");
+    await data.shareBoard(owner.id, board.id, viewer.email, "viewer");
+    const meta = { boardId: board.id, storagePath: `${board.id}/x.png`, mime: "image/png" as const, bytes: 10, width: 4, height: 3 };
+
+    const a = await data.createAsset(owner.id, meta);
+    assert.equal((await data.getAsset(viewer.id, a.id))?.storagePath, meta.storagePath);
+    assert.equal(await data.getAsset(outsider.id, a.id), null);
+    await assert.rejects(data.createAsset(viewer.id, { ...meta, storagePath: `${board.id}/y.png` }));
+    await assert.rejects(data.createAsset(outsider.id, { ...meta, storagePath: `${board.id}/z.png` }));
+    await data.trashBoard(owner.id, board.id);
+    assert.equal(await data.getAsset(owner.id, a.id), null);
+  });
+}

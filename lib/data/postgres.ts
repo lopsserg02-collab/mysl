@@ -3,7 +3,7 @@
 // so the row level security policies in db/migrations decide what each person can see and change.
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
-import { AccessError, type Board, type BoardListItem, type BoardRole, type DataLayer, type Comment, type CommentThread, type Person, type User } from "./types";
+import { AccessError, type Board, type BoardListItem, type BoardRole, type DataLayer, type Asset, type Comment, type CommentThread, type Person, type User } from "./types";
 
 type Sql = postgres.Sql;
 type Tx = postgres.TransactionSql;
@@ -233,6 +233,21 @@ export const postgresData: DataLayer = {
   async unreadMentions(userId) {
     const [row] = await asUser(userId, (tx) => tx<{ n: number }[]>`select count(*)::int as n from notifications where user_id = ${userId} and kind = 'mention' and read_at is null`);
     return row.n;
+  },
+
+  async createAsset(userId, a) {
+    const id = randomUUID();
+    // Row level security: only editors of the board may insert.
+    await asUser(userId, (tx) => tx`insert into assets (id, board_id, uploaded_by, storage_path, mime, bytes, width, height)
+      values (${id}, ${a.boardId}, ${userId}, ${a.storagePath}, ${a.mime}, ${a.bytes}, ${a.width}, ${a.height})`);
+    return { ...a, id };
+  },
+
+  async getAsset(userId, assetId) {
+    if (!UUID.test(assetId)) return null;
+    const [r] = await asUser(userId, (tx) => tx<{ id: string; board_id: string; storage_path: string; mime: Asset["mime"]; bytes: number; width: number | null; height: number | null }[]>`
+      select a.* from assets a join boards b on b.id = a.board_id where a.id = ${assetId} and b.deleted_at is null`);
+    return r ? { id: r.id, boardId: r.board_id, storagePath: r.storage_path, mime: r.mime, bytes: r.bytes, width: r.width, height: r.height } : null;
   },
 };
 

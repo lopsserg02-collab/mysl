@@ -2,7 +2,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { AccessError, SHARE_ROLES, canComment, linkRole, type Board, type BoardListItem, type BoardRole, type Comment, type CommentThread, type DataLayer, type Person, type ShareRole, type User } from "./types";
+import { AccessError, SHARE_ROLES, canComment, canEditBoard, linkRole, type Board, type BoardListItem, type Asset, type BoardRole, type Comment, type CommentThread, type DataLayer, type Person, type ShareRole, type User } from "./types";
 
 interface Db {
   users: User[];
@@ -13,6 +13,7 @@ interface Db {
   invites?: { boardId: string; email: string; role: ShareRole; invitedBy: string; acceptedAt: string | null }[];
   threads?: { id: string; boardId: string; itemId: string | null; x: number; y: number; resolvedAt: string | null; createdBy: string; createdAt: string }[];
   comments?: { id: string; threadId: string; authorId: string; body: string; createdAt: string }[];
+  assets?: Asset[];
   notifications?: { id: string; userId: string; kind: "mention"; boardId: string; commentId: string; actorId: string; readAt: string | null; createdAt: string }[];
 }
 
@@ -353,4 +354,18 @@ export const localData: DataLayer = {
     }),
 
   unreadMentions: (userId) => tx((db) => (db.notifications ?? []).filter((n) => n.userId === userId && !n.readAt).length, false),
+
+  createAsset: (userId, asset) =>
+    tx((db) => {
+      if (!canEditBoard(liveRole(db, asset.boardId, userId))) throw new AccessError();
+      const a: Asset = { ...asset, id: randomUUID() };
+      (db.assets ??= []).push(a);
+      return a;
+    }),
+
+  getAsset: (userId, assetId) =>
+    tx((db) => {
+      const a = (db.assets ?? []).find((x) => x.id === assetId);
+      return a && liveRole(db, a.boardId, userId) ? a : null;
+    }, false),
 };

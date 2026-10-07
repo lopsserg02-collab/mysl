@@ -71,14 +71,22 @@ export interface FrameItem extends Base {
   title: string;
 }
 
-export type Item = StickyItem | TextItem | ShapeItem | ConnectorItem | DrawingItem | FrameItem;
+export interface ImageItem extends Base {
+  type: "image";
+  assetId: string;
+  src: string; // same-origin URL that checks board access
+  alt: string; // file name until someone writes a description
+}
+
+export type Item = StickyItem | TextItem | ShapeItem | ConnectorItem | DrawingItem | FrameItem | ImageItem;
 export type ItemType = Item["type"];
 export type Patch = Partial<Omit<StickyItem, "id" | "type">> &
   Partial<Omit<TextItem, "id" | "type">> &
   Partial<Omit<ShapeItem, "id" | "type">> &
   Partial<Omit<ConnectorItem, "id" | "type">> &
   Partial<Omit<DrawingItem, "id" | "type">> &
-  Partial<Omit<FrameItem, "id" | "type">>;
+  Partial<Omit<FrameItem, "id" | "type">> &
+  Partial<Omit<ImageItem, "id" | "type">>;
 
 export const STICKY_SIZE = 200;
 export const hasText = (i: Item): i is StickyItem | TextItem | ShapeItem => i.type === "sticky" || i.type === "text" || i.type === "shape";
@@ -193,6 +201,13 @@ export function sendToBack(doc: Y.Doc, ids: string[]) {
   itemsMap(doc).forEach((m) => (z = Math.min(z, (m.get("z") as number) ?? 0)));
   if (!Number.isFinite(z)) z = 0;
   updateItems(doc, ids.map((id) => ({ id, patch: { z: --z } })));
+}
+
+/** Size an image so its longer side is at most `max` board units, keeping its proportions. */
+export function fitImage(width: number, height: number, max = 480): { w: number; h: number } {
+  if (!(width > 0 && height > 0)) return { w: max, h: max };
+  const k = Math.min(1, max / Math.max(width, height));
+  return { w: Math.round(width * k), h: Math.round(height * k) };
 }
 
 // ---------- geometry ----------

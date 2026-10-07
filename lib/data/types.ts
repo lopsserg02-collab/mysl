@@ -59,6 +59,19 @@ export interface CommentThread {
   comments: Comment[];
 }
 
+export type AssetMime = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+
+/** An uploaded file. The bytes live in storage (local disk or Supabase Storage) under storagePath. */
+export interface Asset {
+  id: string;
+  boardId: string;
+  storagePath: string;
+  mime: AssetMime;
+  bytes: number;
+  width: number | null;
+  height: number | null;
+}
+
 export type BoardSort = "opened" | "modified" | "name";
 
 export interface DataLayer {
@@ -89,7 +102,12 @@ export interface DataLayer {
   setThreadResolved(userId: string, threadId: string, resolved: boolean): Promise<void>;
   /** How many unread mentions the user has, for the dashboard. */
   unreadMentions(userId: string): Promise<number>;
+  // Images: editors upload; anyone who can see the board can fetch them.
+  createAsset(userId: string, asset: Omit<Asset, "id">): Promise<Asset>;
+  getAsset(userId: string, assetId: string): Promise<Asset | null>;
 }
+
+export const canEditBoard = (r: BoardRole | null) => r === "owner" || r === "coowner" || r === "editor";
 
 export const canComment = (r: BoardRole | null) => r === "owner" || r === "coowner" || r === "editor" || r === "commenter";
 
