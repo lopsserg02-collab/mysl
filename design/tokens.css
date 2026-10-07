@@ -1,4 +1,4 @@
-/* free_pen design tokens. Generated from tokens.json; edit tokens.json, not this file.
+/* Mysl (Мысль) design tokens. Generated from tokens.json; edit tokens.json, not this file.
    Light is the default. Dark applies with prefers-color-scheme unless [data-theme="light"],
    or always with [data-theme="dark"]. Sticky, tag and cursor colours are content colours:
    the same in both themes so a board looks the same to every collaborator. */
@@ -14,11 +14,11 @@
   --color-text: #14171c;
   --color-text-muted: #59626e;
   --color-text-disabled: #9aa1ab;
-  --color-accent: #0f766e;
-  --color-accent-hover: #115e59;
-  --color-accent-subtle: #e3f4f1;
+  --color-accent: #8a2b6e;
+  --color-accent-hover: #6e2058;
+  --color-accent-subtle: #f8eaf3;
   --color-on-accent: #ffffff;
-  --color-focus: #0f766e;
+  --color-focus: #8a2b6e;
   --color-danger: #c62f2f;
   --color-danger-subtle: #fdecec;
   --color-on-danger: #ffffff;
@@ -182,11 +182,11 @@
     --color-text: #eceef1;
     --color-text-muted: #a3abb6;
     --color-text-disabled: #5f6772;
-    --color-accent: #2dd4bf;
-    --color-accent-hover: #5eead4;
-    --color-accent-subtle: #0f2e2b;
-    --color-on-accent: #04201d;
-    --color-focus: #5eead4;
+    --color-accent: #ef8fcb;
+    --color-accent-hover: #f6b5dd;
+    --color-accent-subtle: #3a1530;
+    --color-on-accent: #2a0820;
+    --color-focus: #f6b5dd;
     --color-danger: #ff7b7b;
     --color-danger-subtle: #3a1717;
     --color-on-danger: #2a0505;
@@ -226,11 +226,11 @@
   --color-text: #eceef1;
   --color-text-muted: #a3abb6;
   --color-text-disabled: #5f6772;
-  --color-accent: #2dd4bf;
-  --color-accent-hover: #5eead4;
-  --color-accent-subtle: #0f2e2b;
-  --color-on-accent: #04201d;
-  --color-focus: #5eead4;
+  --color-accent: #ef8fcb;
+  --color-accent-hover: #f6b5dd;
+  --color-accent-subtle: #3a1530;
+  --color-on-accent: #2a0820;
+  --color-focus: #f6b5dd;
   --color-danger: #ff7b7b;
   --color-danger-subtle: #3a1717;
   --color-on-danger: #2a0505;

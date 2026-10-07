@@ -1,4 +1,4 @@
-# free_pen components
+# Mysl (Мысль) components
 
 Reads `recon.md` (Components table, screens S01-S19) and `tokens.json`. Every token below is a role
 name from `tokens.json` / `tokens.css` (Tailwind: `bg-surface`, `text-text-muted`, `rounded-md`...).

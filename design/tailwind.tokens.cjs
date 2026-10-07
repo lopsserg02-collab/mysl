@@ -1,4 +1,4 @@
-/* free_pen Tailwind mapping. Generated from tokens.json. Every value points at a CSS
+/* Mysl (Мысль) Tailwind mapping. Generated from tokens.json. Every value points at a CSS
    variable from tokens.css, so the dark theme and the rebrand need no Tailwind change.
    Usage: module.exports = { darkMode: ['selector', '[data-theme="dark"]'],
             theme: { extend: require('./tailwind.tokens.js').extend } } */
