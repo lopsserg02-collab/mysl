@@ -14,7 +14,8 @@
     "test:e2e": "playwright test",
     "db:migrate": "tsx scripts/migrate.ts",
     "db:migrate:dev": "tsx scripts/migrate.ts --dev-stub",
-    "start:realtime": "tsx server/realtime.ts"
+    "start:realtime": "tsx server/realtime.ts",
+    "db:bundle": "tsx scripts/bundle-migrations.ts"
   },
   "dependencies": {
     "@hocuspocus/extension-database": "^4.7.0",
