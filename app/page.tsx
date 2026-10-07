@@ -1,22 +1,39 @@
 import Link from "next/link";
 import { Plus, Search, Star, Trash2, LayoutGrid, LogOut } from "lucide-react";
 import { data, type BoardSort } from "@/lib/data";
-import { requireUser } from "@/lib/session";
+import type { Metadata } from "next";
+import { currentUser } from "@/lib/session";
+import type { User } from "@/lib/data";
+import { siteUrl } from "@/lib/site";
+import { Landing } from "@/components/landing/Landing";
 import { t } from "@/lib/copy";
 import { createBoard } from "./actions";
 import { signOut } from "./login/actions";
 import { BoardCard } from "@/components/dashboard/BoardCard";
 
-export const metadata = { title: "Мои доски" };
+// One address, two pages: signed-out visitors get the landing page, signed-in people their boards.
+export async function generateMetadata(): Promise<Metadata> {
+  if (await currentUser()) return { title: "Мои доски" };
+  return {
+    title: { absolute: t.landing.metaTitle },
+    description: t.landing.metaDescription,
+    alternates: { canonical: "/" },
+    openGraph: { type: "website", locale: "ru_RU", siteName: t.product, url: siteUrl, title: t.landing.metaTitle, description: t.landing.metaDescription },
+    twitter: { card: "summary_large_image", title: t.landing.metaTitle, description: t.landing.metaDescription },
+  };
+}
 
 type View = "all" | "starred" | "trash";
 
-export default async function Dashboard({
-  searchParams,
-}: {
-  searchParams: Promise<{ q?: string; sort?: string; view?: string }>;
-}) {
-  const user = await requireUser("/");
+type SearchParams = Promise<{ q?: string; sort?: string; view?: string }>;
+
+export default async function Home({ searchParams }: { searchParams: SearchParams }) {
+  const user = await currentUser();
+  if (!user) return <Landing />;
+  return <Dashboard user={user} searchParams={searchParams} />;
+}
+
+async function Dashboard({ user, searchParams }: { user: User; searchParams: SearchParams }) {
   const sp = await searchParams;
   const q = (sp.q ?? "").slice(0, 100);
   const sort: BoardSort = sp.sort === "modified" || sp.sort === "name" ? sp.sort : "opened";

@@ -5,7 +5,7 @@ begin;
 create table if not exists schema_migrations (name text primary key, applied_at timestamptz not null default now());
 
 -- ===== 0001_init.sql =====
--- free_pen: first migration. Postgres 15+ on Supabase.
+-- Mysl: first migration. Postgres 15+ on Supabase.
 -- Board content (items) lives in a Yjs CRDT document per board, stored in board_docs.
 -- Relational tables hold everything that needs auth, querying or billing.
 -- Access rule: row level security on every table; the realtime server uses the service role
