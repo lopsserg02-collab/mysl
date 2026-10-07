@@ -22,6 +22,7 @@ import { ExportDialog } from "./ExportDialog";
 import { download, fileName, renderRegion, toPdfBlob, toPngBlob, type ExportFormat, type ExportScope } from "./exportBoard";
 import { ShareDialog } from "./ShareDialog";
 import { Comments, type CommentDraft } from "./Comments";
+import { NotificationBell } from "../NotificationBell";
 import { FONT, PAD, autoTextWidth, fittedFontSize, textHeight } from "./text";
 
 type Tool = "select" | "hand" | "sticky" | "text" | "shape" | "connector" | "pen" | "highlighter" | "eraser" | "frame" | "comment";
@@ -40,7 +41,7 @@ type Drag =
 
 const rectFrom = (a: Pt, b: Pt): Box => ({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) });
 
-export function Board({ board, role, user }: { board: { id: string; name: string; linkAccess: LinkAccess }; role: BoardRole; user: { id: string; name: string } }) {
+export function Board({ board, role, user, unread }: { board: { id: string; name: string; linkAccess: LinkAccess }; role: BoardRole; user: { id: string; name: string }; unread?: number }) {
   const [shareOpen, setShareOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState(false); // draws every item, not just what is on screen, and hides selection
@@ -781,6 +782,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
           {peers.map((p) => (
             <Avatar key={p.clientId} name={p.name} color={p.color.fill} label={p.name} />
           ))}
+          <NotificationBell initialUnread={unread} />
           <button
             type="button"
             onClick={() => setExportOpen(true)}

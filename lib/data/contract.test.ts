@@ -3,8 +3,12 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtempSync } from "node:fs";
-import type { DataLayer } from "./types";
+import { mkdtempSync, promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
+import postgres from "postgres";
+import * as Y from "yjs";
+import { addItem, addSticky, readAll, type ImageItem } from "../board/model";
+import { daysUntilPurge, type DataLayer } from "./types";
 
 process.env.DATA_DIR = mkdtempSync(path.join(os.tmpdir(), "mysl-data-"));
 const layers: [string, () => Promise<DataLayer>][] = [["local", async () => (await import("./local")).localData]];
@@ -152,5 +156,226 @@ for (const [name, load] of layers) {
     await assert.rejects(data.createAsset(outsider.id, { ...meta, storagePath: `${board.id}/z.png` }));
     await data.trashBoard(owner.id, board.id);
     assert.equal(await data.getAsset(owner.id, a.id), null);
+  });
+}
+
+// ---------- duplicate, trash purge, notifications ----------
+
+// Board content is written by the realtime server, not the data layer; tests write and read it the same way it does.
+async function seedDoc(layer: string, boardId: string, state: Uint8Array) {
+  if (layer === "local") {
+    await fs.mkdir(path.join(process.env.DATA_DIR!, "docs"), { recursive: true });
+    await fs.writeFile(path.join(process.env.DATA_DIR!, "docs", `${boardId}.bin`), state);
+  } else {
+    await raw()`insert into board_docs (board_id, state) values (${boardId}, ${Buffer.from(state)}) on conflict (board_id) do update set state = excluded.state`;
+  }
+}
+
+async function readDoc(layer: string, boardId: string): Promise<Uint8Array | null> {
+  if (layer === "local") {
+    try {
+      return new Uint8Array(await fs.readFile(path.join(process.env.DATA_DIR!, "docs", `${boardId}.bin`)));
+    } catch {
+      return null;
+    }
+  }
+  const [row] = await raw()<{ state: Buffer }[]>`select state from board_docs where board_id = ${boardId}`;
+  return row ? new Uint8Array(row.state) : null;
+}
+
+let rawClient: postgres.Sql | null = null;
+function raw() {
+  rawClient ??= postgres(process.env.TEST_DATABASE_URL!, { max: 2, onnotice: () => {} });
+  return rawClient;
+}
+after(async () => {
+  await rawClient?.end();
+});
+
+const DAY = 86_400_000;
+
+for (const [name, load] of layers) {
+  test(`${name}: duplicate copies content and images for the person who copies`, async () => {
+    const data = await load();
+    const owner = await data.upsertUserByEmail(`do-${uniq()}@example.com`, "Дина");
+    const editor = await data.upsertUserByEmail(`de-${uniq()}@example.com`, "Эдик");
+    const viewer = await data.upsertUserByEmail(`dv-${uniq()}@example.com`, "Ваня");
+    const outsider = await data.upsertUserByEmail(`dx-${uniq()}@example.com`, "Хаким");
+    const board = await data.createBoard(owner.id, "Исходная");
+    await data.shareBoard(owner.id, board.id, editor.email, "editor");
+    await data.shareBoard(owner.id, board.id, viewer.email, "viewer");
+    const asset = await data.createAsset(owner.id, { boardId: board.id, storagePath: `${board.id}/${randomUUID()}.png`, mime: "image/png", bytes: 10, width: 4, height: 3 });
+
+    const doc = new Y.Doc();
+    const sticky = addSticky(doc, { x: 0, y: 0 }, owner.id, { text: "Идея" });
+    const image = addItem<ImageItem>(doc, { type: "image", x: 300, y: 0, w: 4, h: 3, assetId: asset.id, src: `/api/assets/${asset.id}`, alt: "x.png" }, owner.id);
+    await seedDoc(name, board.id, Y.encodeStateAsUpdate(doc));
+
+    // Viewers and outsiders cannot copy
+    await assert.rejects(data.duplicateBoard(viewer.id, board.id, "Копия"));
+    await assert.rejects(data.duplicateBoard(outsider.id, board.id, "Копия"));
+
+    const copy = await data.duplicateBoard(editor.id, board.id, "Исходная (копия)");
+    assert.equal(copy.name, "Исходная (копия)");
+    assert.equal(copy.ownerId, editor.id);
+    assert.equal(copy.linkAccess, "private");
+    assert.equal(await data.getRole(copy.id, editor.id), "owner");
+    // The copy is private to whoever made it
+    assert.equal(await data.getRole(copy.id, owner.id), null);
+    assert.ok((await data.listBoards(editor.id)).some((b) => b.id === copy.id));
+
+    const copied = new Y.Doc();
+    Y.applyUpdate(copied, (await readDoc(name, copy.id))!);
+    const items = readAll(copied);
+    assert.equal(items.find((i) => i.id === sticky.id && i.type === "sticky")?.type, "sticky");
+    const img = items.find((i) => i.id === image.id) as ImageItem;
+    assert.notEqual(img.assetId, asset.id);
+    assert.equal(img.src, `/api/assets/${img.assetId}`);
+    const copiedAsset = await data.getAsset(editor.id, img.assetId);
+    assert.equal(copiedAsset?.boardId, copy.id);
+    assert.equal(copiedAsset?.storagePath, asset.storagePath);
+    assert.equal(await data.getAsset(owner.id, img.assetId), null);
+
+    // A board that was never opened copies as an empty board
+    const blank = await data.createBoard(owner.id, "Пустая");
+    const blankCopy = await data.duplicateBoard(owner.id, blank.id, "Пустая (копия)");
+    const empty = new Y.Doc();
+    Y.applyUpdate(empty, (await readDoc(name, blankCopy.id))!);
+    assert.equal(readAll(empty).length, 0);
+
+    // Images of the copy survive the original being purged; the shared file is not reported as orphaned
+    await data.trashBoard(owner.id, board.id);
+    const purged = await data.purgeTrash(new Date(Date.now() + 31 * DAY));
+    assert.ok(purged.boards >= 1);
+    assert.ok(!purged.orphanedFiles.includes(asset.storagePath));
+    assert.equal(await data.getBoard(board.id), null);
+    assert.equal((await data.getAsset(editor.id, img.assetId))?.storagePath, asset.storagePath);
+    // Once the copy goes too, the file is orphaned
+    await data.trashBoard(editor.id, copy.id);
+    const again = await data.purgeTrash(new Date(Date.now() + 31 * DAY));
+    assert.ok(again.orphanedFiles.includes(asset.storagePath));
+  });
+}
+
+for (const [name, load] of layers) {
+  test(`${name}: trash purge deletes boards after 30 days only`, async () => {
+    const data = await load();
+    const owner = await data.upsertUserByEmail(`p-${uniq()}@example.com`, "Пётр");
+    const old = await data.createBoard(owner.id, "Старая");
+    const recent = await data.createBoard(owner.id, "Свежая");
+    const live = await data.createBoard(owner.id, "Живая");
+    await data.trashBoard(owner.id, old.id);
+    await data.trashBoard(owner.id, recent.id);
+    await data.createThread(owner.id, live.id, { x: 0, y: 0 }, "остаётся");
+
+    // Nothing is older than 30 days yet
+    await data.purgeTrash(new Date());
+    assert.equal((await data.listBoards(owner.id, { trashed: true })).length, 2);
+
+    // 29 days on, still kept
+    const trashedAt = Date.parse((await data.getBoard(old.id))!.deletedAt!);
+    await data.purgeTrash(new Date(trashedAt + 29 * DAY));
+    assert.equal((await data.listBoards(owner.id, { trashed: true })).length, 2);
+
+    // 31 days on, both trashed boards are gone for good; the live one is untouched
+    await data.purgeTrash(new Date(trashedAt + 31 * DAY));
+    assert.deepEqual(await data.listBoards(owner.id, { trashed: true }), []);
+    assert.equal(await data.getBoard(old.id), null);
+    assert.equal(await data.getBoard(recent.id), null);
+    await assert.rejects(data.restoreBoard(owner.id, old.id));
+    assert.equal(await data.getRole(live.id, owner.id), "owner");
+    assert.equal((await data.listThreads(owner.id, live.id)).length, 1);
+  });
+}
+
+test("days left before purge", () => {
+  const now = Date.parse("2026-10-07T12:00:00Z");
+  assert.equal(daysUntilPurge(new Date(now).toISOString(), now), 30);
+  assert.equal(daysUntilPurge(new Date(now - 1 * DAY).toISOString(), now), 29);
+  assert.equal(daysUntilPurge(new Date(now - 29.5 * DAY).toISOString(), now), 1);
+  assert.equal(daysUntilPurge(new Date(now - 40 * DAY).toISOString(), now), 0);
+});
+
+for (const [name, load] of layers) {
+  test(`${name}: notifications for mentions and invites, private to their owner`, async () => {
+    const data = await load();
+    const a = await data.upsertUserByEmail(`na-${uniq()}@example.com`, "Аня");
+    const b = await data.upsertUserByEmail(`nb-${uniq()}@example.com`, "Боря");
+    const board = await data.createBoard(a.id, "Планёрка");
+
+    // Adding an existing account notifies them; changing their role later does not notify again
+    await data.shareBoard(a.id, board.id, b.email, "editor");
+    await data.shareBoard(a.id, board.id, b.email, "commenter");
+    let mine = await data.listNotifications(b.id);
+    assert.deepEqual(mine.map((n) => [n.kind, n.boardName, n.actorName, n.read]), [["invite", "Планёрка", "Аня", false]]);
+
+    // An invite for an address without an account turns into a notification on sign-up
+    const later = `nl-${uniq()}@example.com`;
+    await data.shareBoard(a.id, board.id, later, "viewer");
+    const newcomer = await data.upsertUserByEmail(later, "Лена");
+    assert.deepEqual((await data.listNotifications(newcomer.id)).map((n) => [n.kind, n.boardId, n.actorName]), [["invite", board.id, "Аня"]]);
+
+    // B mentions A; A sees the comment text, B does not get a notification for their own comment
+    await data.createThread(b.id, board.id, { x: 0, y: 0 }, "@Аня глянь", [a.id, b.id]);
+    const forA = await data.listNotifications(a.id);
+    assert.deepEqual(forA.map((n) => [n.kind, n.actorName, n.excerpt]), [["mention", "Боря", "@Аня глянь"]]);
+    assert.equal(await data.unreadNotifications(a.id), 1);
+    assert.equal(await data.unreadNotifications(b.id), 1);
+
+    // B cannot read or mark A's notifications
+    mine = await data.listNotifications(b.id);
+    assert.ok(!mine.some((n) => n.id === forA[0].id));
+    await data.markNotificationsRead(b.id, [forA[0].id]);
+    assert.equal(await data.unreadNotifications(a.id), 1);
+    await data.markNotificationsRead(b.id);
+    assert.equal(await data.unreadNotifications(a.id), 1);
+    assert.equal(await data.unreadNotifications(b.id), 0);
+
+    // Marking one read, then all
+    await new Promise((r) => setTimeout(r, 5)); // distinct timestamps, so "newest first" is well defined
+    await data.createThread(b.id, board.id, { x: 5, y: 5 }, "@Аня ещё", [a.id]);
+    const two = await data.listNotifications(a.id);
+    assert.equal(two.length, 2);
+    assert.equal(two[0].excerpt, "@Аня ещё");
+    await data.markNotificationsRead(a.id, [two[0].id]);
+    assert.deepEqual((await data.listNotifications(a.id)).map((n) => n.read), [true, false]);
+    await data.markNotificationsRead(a.id);
+    assert.equal(await data.unreadNotifications(a.id), 0);
+
+    // Losing access to the board hides its notifications
+    await data.setMemberRole(a.id, board.id, b.id, null);
+    assert.deepEqual(await data.listNotifications(b.id), []);
+  });
+}
+
+if (process.env.TEST_DATABASE_URL) {
+  test("postgres: row level security keeps notifications private at the table", async () => {
+    const data = (await import("./postgres")).postgresData;
+    const a = await data.upsertUserByEmail(`ra-${uniq()}@example.com`, "Ада");
+    const b = await data.upsertUserByEmail(`rb-${uniq()}@example.com`, "Бен");
+    const board = await data.createBoard(b.id, "Секрет");
+    await data.shareBoard(b.id, board.id, a.email, "editor");
+    const [own] = await data.listNotifications(a.id);
+    assert.ok(own);
+
+    const asB = <T>(fn: (tx: postgres.TransactionSql) => Promise<T>) =>
+      raw().begin(async (tx) => {
+        await tx`select set_config('request.jwt.claims', ${JSON.stringify({ sub: b.id, role: "authenticated" })}, true)`;
+        await tx.unsafe("set local role authenticated");
+        return fn(tx);
+      }) as Promise<T>;
+
+    assert.equal((await asB((tx) => tx`select id from notifications where user_id = ${a.id}`)).length, 0);
+    assert.equal((await asB((tx) => tx`select id from notifications where id = ${own.id}`)).length, 0);
+    assert.equal((await asB((tx) => tx`update notifications set read_at = now() where id = ${own.id}`)).count, 0);
+    assert.equal((await asB((tx) => tx`delete from notifications where id = ${own.id}`)).count, 0);
+    await assert.rejects(asB((tx) => tx`insert into notifications (user_id, kind, board_id) values (${a.id}, 'mention', ${board.id})`));
+    assert.equal((await asB((tx) => tx`select * from my_notifications(200) where id = ${own.id}`)).length, 0);
+    // Board content stays with the realtime server: users cannot read board_docs or seed someone else's board
+    assert.equal((await asB((tx) => tx`select board_id from board_docs`)).length, 0);
+    const other = await data.createBoard(a.id, "Чужая");
+    await assert.rejects(asB((tx) => tx`select seed_board_doc(${other.id}, ${Buffer.from([0, 0])})`));
+    await assert.rejects(asB((tx) => tx`select board_doc_state(${other.id})`));
+    assert.equal((await data.listNotifications(a.id)).find((n) => n.id === own.id)?.read, false);
   });
 }

@@ -74,6 +74,30 @@ export interface Asset {
 
 export type BoardSort = "opened" | "modified" | "name";
 
+export type NotificationKind = "mention" | "invite";
+
+/** An in-app notification: someone mentioned you in a comment, or added you to a board. */
+export interface AppNotification {
+  id: string;
+  kind: NotificationKind;
+  boardId: string;
+  boardName: string;
+  actorName: string;
+  /** The comment text for a mention, empty for an invite. */
+  excerpt: string;
+  read: boolean;
+  createdAt: string;
+}
+
+/** Boards stay in the trash this many days, then are deleted for good. */
+export const TRASH_DAYS = 30;
+
+/** Whole days left before a trashed board is purged (0 means it goes at the next purge). */
+export function daysUntilPurge(deletedAt: string, now = Date.now()): number {
+  const left = Date.parse(deletedAt) + TRASH_DAYS * 86_400_000 - now;
+  return Math.max(0, Math.ceil(left / 86_400_000));
+}
+
 export interface DataLayer {
   upsertUserByEmail(email: string, name: string): Promise<User>;
   getUser(id: string): Promise<User | null>;
@@ -87,6 +111,13 @@ export interface DataLayer {
   trashBoard(userId: string, boardId: string): Promise<void>;
   restoreBoard(userId: string, boardId: string): Promise<void>;
   touchBoard(boardId: string): Promise<void>;
+  /** Copy a board the user can edit: content (images keep working), name and description. The copy is private and theirs. */
+  duplicateBoard(userId: string, boardId: string, name: string): Promise<Board>;
+  /**
+   * System job, no user: delete boards that have been in the trash longer than TRASH_DAYS.
+   * Returns how many went and the stored files nothing references any more, for the caller to delete.
+   */
+  purgeTrash(now?: Date): Promise<{ boards: number; orphanedFiles: string[] }>;
   // Sharing: only owners and co-owners change access; anyone on the board sees the people list.
   listPeople(userId: string, boardId: string): Promise<Person[]>;
   shareBoard(userId: string, boardId: string, email: string, role: ShareRole): Promise<"added" | "invited">;
@@ -102,6 +133,11 @@ export interface DataLayer {
   setThreadResolved(userId: string, threadId: string, resolved: boolean): Promise<void>;
   /** How many unread mentions the user has, for the dashboard. */
   unreadMentions(userId: string): Promise<number>;
+  // Notifications: each person sees and changes only their own. Boards they lost access to drop out.
+  listNotifications(userId: string, limit?: number): Promise<AppNotification[]>;
+  unreadNotifications(userId: string): Promise<number>;
+  /** Mark the given notifications read, or all of them when ids is omitted. Ids that are not the user's are ignored. */
+  markNotificationsRead(userId: string, ids?: string[]): Promise<void>;
   // Images: editors upload; anyone who can see the board can fetch them.
   createAsset(userId: string, asset: Omit<Asset, "id">): Promise<Asset>;
   getAsset(userId: string, assetId: string): Promise<Asset | null>;

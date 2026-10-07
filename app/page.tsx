@@ -6,6 +6,7 @@ import { t } from "@/lib/copy";
 import { createBoard } from "./actions";
 import { signOut } from "./login/actions";
 import { BoardCard } from "@/components/dashboard/BoardCard";
+import { NotificationBell } from "@/components/NotificationBell";
 
 export const metadata = { title: "Мои доски" };
 
@@ -21,7 +22,10 @@ export default async function Dashboard({
   const q = (sp.q ?? "").slice(0, 100);
   const sort: BoardSort = sp.sort === "modified" || sp.sort === "name" ? sp.sort : "opened";
   const view: View = sp.view === "starred" || sp.view === "trash" ? sp.view : "all";
-  const boards = await data.listBoards(user.id, { q, sort, starredOnly: view === "starred", trashed: view === "trash" });
+  const [boards, unread] = await Promise.all([
+    data.listBoards(user.id, { q, sort, starredOnly: view === "starred", trashed: view === "trash" }),
+    data.unreadNotifications(user.id),
+  ]);
 
   const tab = (v: View, label: string, Icon: typeof Star) => (
     <Link
@@ -75,6 +79,7 @@ export default async function Dashboard({
             </label>
             <button className="h-10 rounded-md border border-border-input px-3 hover:bg-surface-hover">OK</button>
           </form>
+          <NotificationBell initialUnread={unread} />
           {view !== "trash" && (
             <form action={createBoard}>
               <button className="flex h-10 items-center gap-2 rounded-md bg-accent px-4 font-semibold text-on-accent hover:bg-accent-hover">
