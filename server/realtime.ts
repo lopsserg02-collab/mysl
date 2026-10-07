@@ -8,7 +8,10 @@ import postgres from "postgres";
 import { verify, type RealtimeClaims } from "../lib/token";
 
 const DOCS_DIR = path.join(process.env.DATA_DIR ?? path.join(process.cwd(), ".data"), "docs");
-const port = Number(process.env.REALTIME_PORT ?? 1234);
+// Hosts such as Render pass the port in PORT.
+const port = Number(process.env.PORT ?? process.env.REALTIME_PORT ?? 1234);
+// Files on a host's disk vanish on redeploy: in production the boards must live in Postgres.
+if (process.env.NODE_ENV === "production" && process.env.DATA_LAYER !== "postgres") throw new Error("Set DATA_LAYER=postgres and DATABASE_URL in production");
 const ID = /^board:([0-9a-f-]{36})$/;
 
 function fileFor(documentName: string) {
@@ -81,4 +84,4 @@ const server = new Server<RealtimeClaims>({
   extensions: [new Database(process.env.DATA_LAYER === "postgres" ? postgresStore() : fileStore())],
 });
 
-server.listen().then(() => console.log(`realtime listening on ws://localhost:${port}`));
+server.listen().then(() => console.log(`realtime listening on port ${port}`));
