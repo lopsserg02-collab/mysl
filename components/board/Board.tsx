@@ -997,6 +997,7 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
       onPointerLeave={hideCursor}
       data-ready={ready || undefined}
       data-tool={tool}
+      data-items={items.length}
       onDragOver={(e) => {
         if (canEdit && e.dataTransfer.types.includes("Files")) e.preventDefault();
       }}
@@ -1373,12 +1374,6 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
           </ToolButton>
           {!allLocked && <ToolButton small label={t.board.remove} onClick={removeSelected}><Trash2 size={16} /></ToolButton>}
         </div>
-      )}
-
-      {items.length === 0 && ready && canEdit && tool === "select" && (
-        <p className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-md bg-bg px-4 py-2 text-center text-text-muted shadow-card">
-          {t.board.emptyHint}
-        </p>
       )}
 
       <div className="absolute bottom-3 right-3 flex h-12 items-center gap-1 rounded-md bg-bg px-1 shadow-toolbar">

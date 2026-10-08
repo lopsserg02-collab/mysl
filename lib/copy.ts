@@ -450,7 +450,6 @@ export const t = {
     readOnly: "Только просмотр",
     titleFallback: "Доска",
     stickyPlaceholder: "Напишите мысль",
-    emptyHint: "Нажмите N и кликните по доске, чтобы добавить стикер",
     you: "вы",
     morePeople: (n: number) => `Ещё ${n} на доске`,
   },
