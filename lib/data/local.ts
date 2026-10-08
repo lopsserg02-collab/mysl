@@ -2,7 +2,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { AccessError, SHARE_ROLES, canComment, canEditBoard, linkRole, type Board, type BoardListItem, type Asset, type BoardRole, type Comment, type CommentThread, type DataLayer, type Person, type ShareRole, type User } from "./types";
+import { cloneBoardState } from "../board/clone";
+import { AccessError, SHARE_ROLES, TRASH_DAYS, canComment, canEditBoard, linkRole, type AppNotification, type Board, type BoardListItem, type Asset, type BoardRole, type Comment, type CommentThread, type DataLayer, type Person, type ShareRole, type Subscription, type BillingWriter, type BoardUsage, type User } from "./types";
 
 interface Db {
   users: User[];
@@ -14,11 +15,14 @@ interface Db {
   threads?: { id: string; boardId: string; itemId: string | null; x: number; y: number; resolvedAt: string | null; createdBy: string; createdAt: string }[];
   comments?: { id: string; threadId: string; authorId: string; body: string; createdAt: string }[];
   assets?: Asset[];
-  notifications?: { id: string; userId: string; kind: "mention"; boardId: string; commentId: string; actorId: string; readAt: string | null; createdAt: string }[];
+  notifications?: { id: string; userId: string; kind: "mention" | "invite"; boardId: string; commentId: string | null; actorId: string; readAt: string | null; createdAt: string }[];
+  subscriptions?: (Subscription & { lastEventAt: string | null })[];
+  stripeEvents?: { id: string; type: string; receivedAt: string }[];
 }
 
 const DATA_DIR = process.env.DATA_DIR ?? path.join(process.cwd(), ".data");
 const FILE = path.join(DATA_DIR, "db.json");
+const docFile = (boardId: string) => path.join(DATA_DIR, "docs", `${boardId}.bin`);
 const empty = (): Db => ({ users: [], teams: [], teamMembers: [], boards: [], boardMembers: [] });
 
 // Serialise every read-modify-write so concurrent requests cannot lose updates.
@@ -93,9 +97,19 @@ function addComment(db: Db, boardId: string, threadId: string, userId: string, b
   (db.comments ??= []).push(c);
   for (const u of new Set(mentions)) {
     if (u === userId || !roleOf(db, boardId, u)) continue;
-    (db.notifications ??= []).push({ id: randomUUID(), userId: u, kind: "mention", boardId, commentId: c.id, actorId: userId, readAt: null, createdAt: c.createdAt });
+    notify(db, u, "mention", boardId, userId, c.id);
   }
   return toComment(db, c);
+}
+
+function notify(db: Db, to: string, kind: "mention" | "invite", boardId: string, actorId: string, commentId: string | null) {
+  if (to === actorId) return;
+  (db.notifications ??= []).push({ id: randomUUID(), userId: to, kind, boardId, commentId, actorId, readAt: null, createdAt: now() });
+}
+
+/** The user's notifications on boards they can still open, newest first. */
+function visibleNotifications(db: Db, userId: string) {
+  return (db.notifications ?? []).filter((n) => n.userId === userId && liveRole(db, n.boardId, userId)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 const toComment = (db: Db, c: NonNullable<Db["comments"]>[number]): Comment => ({
@@ -109,6 +123,25 @@ const toComment = (db: Db, c: NonNullable<Db["comments"]>[number]): Comment => (
 function liveRole(db: Db, boardId: string, userId: string) {
   const b = db.boards.find((x) => x.id === boardId);
   return b && !b.deletedAt ? roleOf(db, boardId, userId) : null;
+}
+
+const EDIT_ROLES: BoardRole[] = ["coowner", "editor"];
+
+function subscriptionOf(db: Db, userId: string): Subscription | null {
+  const row = (db.subscriptions ?? []).find((x) => x.userId === userId);
+  if (!row) return null;
+  const { lastEventAt: _, ...sub } = row;
+  return { ...sub };
+}
+
+function subscriptionRow(db: Db, userId: string) {
+  db.subscriptions ??= [];
+  let row = db.subscriptions.find((x) => x.userId === userId);
+  if (!row) {
+    row = { userId, plan: "free", status: "none", stripeCustomerId: null, stripeSubscriptionId: null, currentPeriodEnd: null, cancelAtPeriodEnd: false, lastEventAt: null };
+    db.subscriptions.push(row);
+  }
+  return row;
 }
 
 function roleOf(db: Db, boardId: string, userId: string): BoardRole | null {
@@ -131,6 +164,7 @@ export const localData: DataLayer = {
           if (inv.email !== key || inv.acceptedAt) continue;
           db.boardMembers.push({ boardId: inv.boardId, userId: user.id, role: inv.role, starred: false, lastOpenedAt: null });
           inv.acceptedAt = now();
+          notify(db, user.id, "invite", inv.boardId, inv.invitedBy, null);
         }
       } else if (name.trim()) {
         user.name = name.trim();
@@ -240,6 +274,68 @@ export const localData: DataLayer = {
       if (b) b.updatedAt = now();
     }),
 
+  duplicateBoard: async (userId, boardId, name) => {
+    const { board, assets } = await tx((db) => {
+      const src = db.boards.find((x) => x.id === boardId);
+      if (!src || !canEditBoard(liveRole(db, boardId, userId))) throw new AccessError();
+      const team = db.teamMembers.find((t) => t.userId === userId);
+      if (!team) throw new AccessError("No team for this user");
+      const ts = now();
+      const board: Board = {
+        id: randomUUID(),
+        teamId: team.teamId,
+        ownerId: userId,
+        name: name.trim().slice(0, 60) || src.name,
+        description: src.description,
+        linkAccess: "private",
+        createdAt: ts,
+        updatedAt: ts,
+        deletedAt: null,
+      };
+      db.boards.push(board);
+      db.boardMembers.push({ boardId: board.id, userId, role: "owner", starred: false, lastOpenedAt: ts });
+      // The copy gets its own asset rows over the same stored files, so its images do not depend on the original.
+      const assets = new Map<string, string>();
+      for (const a of (db.assets ?? []).filter((x) => x.boardId === boardId)) {
+        const id = randomUUID();
+        assets.set(a.id, id);
+        db.assets!.push({ ...a, id, boardId: board.id });
+      }
+      return { board, assets };
+    });
+    let state: Uint8Array | null = null;
+    try {
+      state = new Uint8Array(await fs.readFile(docFile(boardId)));
+    } catch {
+      // never opened: nothing to copy
+    }
+    await fs.mkdir(path.dirname(docFile(board.id)), { recursive: true });
+    await fs.writeFile(docFile(board.id), cloneBoardState(state, assets));
+    return board;
+  },
+
+  purgeTrash: async (at = new Date()) => {
+    const cutoff = new Date(at.getTime() - TRASH_DAYS * 86_400_000).toISOString();
+    const { gone, orphanedFiles } = await tx((db) => {
+      const gone = new Set(db.boards.filter((b) => b.deletedAt && b.deletedAt < cutoff).map((b) => b.id));
+      if (!gone.size) return { gone, orphanedFiles: [] as string[] };
+      const threads = new Set((db.threads ?? []).filter((t) => gone.has(t.boardId)).map((t) => t.id));
+      const paths = new Set((db.assets ?? []).filter((a) => gone.has(a.boardId)).map((a) => a.storagePath));
+      db.boards = db.boards.filter((b) => !gone.has(b.id));
+      db.boardMembers = db.boardMembers.filter((m) => !gone.has(m.boardId));
+      db.invites = (db.invites ?? []).filter((i) => !gone.has(i.boardId));
+      db.threads = (db.threads ?? []).filter((t) => !threads.has(t.id));
+      db.comments = (db.comments ?? []).filter((c) => !threads.has(c.threadId));
+      db.notifications = (db.notifications ?? []).filter((n) => !gone.has(n.boardId));
+      db.assets = (db.assets ?? []).filter((a) => !gone.has(a.boardId));
+      // A duplicate may share a stored file with the purged board: keep files still in use.
+      for (const a of db.assets) paths.delete(a.storagePath);
+      return { gone, orphanedFiles: [...paths] };
+    });
+    await Promise.all([...gone].map((id) => fs.rm(docFile(id), { force: true })));
+    return { boards: gone.size, orphanedFiles };
+  },
+
   listPeople: (userId, boardId) =>
     tx((db) => {
       if (!roleOf(db, boardId, userId)) throw new AccessError();
@@ -262,8 +358,10 @@ export const localData: DataLayer = {
       const user = db.users.find((u) => u.email === key);
       if (user) {
         const m = db.boardMembers.find((x) => x.boardId === boardId && x.userId === user.id);
-        if (!m) db.boardMembers.push({ boardId, userId: user.id, role, starred: false, lastOpenedAt: null });
-        else if (!canManage(m.role)) m.role = role;
+        if (!m) {
+          db.boardMembers.push({ boardId, userId: user.id, role, starred: false, lastOpenedAt: null });
+          notify(db, user.id, "invite", boardId, userId, null);
+        } else if (!canManage(m.role)) m.role = role;
         return "added" as const;
       }
       db.invites ??= [];
@@ -298,14 +396,15 @@ export const localData: DataLayer = {
       b.updatedAt = now();
     }),
 
-  joinViaLink: (userId, boardId) =>
+  joinViaLink: (userId, boardId, opts = {}) =>
     tx((db) => {
       const b = db.boards.find((x) => x.id === boardId && !x.deletedAt);
       if (!b) return null;
       const current = roleOf(db, boardId, userId);
       if (current) return current;
-      const via = linkRole(b.linkAccess);
+      let via = linkRole(b.linkAccess);
       if (!via) return null;
+      if (via === "editor" && opts.maxRole) via = opts.maxRole;
       db.boardMembers.push({ boardId, userId, role: via, starred: false, lastOpenedAt: null });
       return via;
     }),
@@ -353,7 +452,35 @@ export const localData: DataLayer = {
       t.resolvedAt = resolved ? now() : null;
     }),
 
-  unreadMentions: (userId) => tx((db) => (db.notifications ?? []).filter((n) => n.userId === userId && !n.readAt).length, false),
+  unreadMentions: (userId) => tx((db) => (db.notifications ?? []).filter((n) => n.userId === userId && n.kind === "mention" && !n.readAt).length, false),
+
+  listNotifications: (userId, limit = 50) =>
+    tx(
+      (db) =>
+        visibleNotifications(db, userId)
+          .slice(0, limit)
+          .map(
+            (n): AppNotification => ({
+              id: n.id,
+              kind: n.kind,
+              boardId: n.boardId,
+              boardName: db.boards.find((b) => b.id === n.boardId)?.name ?? "",
+              actorName: db.users.find((u) => u.id === n.actorId)?.name ?? "",
+              excerpt: (n.commentId && (db.comments ?? []).find((c) => c.id === n.commentId)?.body) || "",
+              read: Boolean(n.readAt),
+              createdAt: n.createdAt,
+            }),
+          ),
+      false,
+    ),
+
+  unreadNotifications: (userId) => tx((db) => visibleNotifications(db, userId).filter((n) => !n.readAt).length, false),
+
+  markNotificationsRead: (userId, ids) =>
+    tx((db) => {
+      const only = ids && new Set(ids);
+      for (const n of db.notifications ?? []) if (n.userId === userId && !n.readAt && (!only || only.has(n.id))) n.readAt = now();
+    }),
 
   createAsset: (userId, asset) =>
     tx((db) => {
@@ -368,4 +495,45 @@ export const localData: DataLayer = {
       const a = (db.assets ?? []).find((x) => x.id === assetId);
       return a && liveRole(db, a.boardId, userId) ? a : null;
     }, false),
+
+  getSubscription: (userId) => tx((db) => subscriptionOf(db, userId), false),
+
+  boardUsage: (boardId) =>
+    tx((db) => {
+      const b = db.boards.find((x) => x.id === boardId);
+      if (!b) return null;
+      const editors: BoardUsage["editors"] = db.boardMembers
+        .filter((m) => m.boardId === boardId && EDIT_ROLES.includes(m.role))
+        .map((m) => ({ userId: m.userId, email: db.users.find((u) => u.id === m.userId)?.email ?? "" }));
+      for (const i of db.invites ?? []) if (i.boardId === boardId && !i.acceptedAt && i.role === "editor") editors.push({ userId: null, email: i.email });
+      const owned = new Set(db.boards.filter((x) => x.ownerId === b.ownerId).map((x) => x.id));
+      const storageBytes = (db.assets ?? []).filter((a) => owned.has(a.boardId)).reduce((n, a) => n + a.bytes, 0);
+      return { ownerId: b.ownerId, ownerSubscription: subscriptionOf(db, b.ownerId), editors, storageBytes };
+    }, false),
+
+  setStripeCustomer: (userId, customerId) =>
+    tx((db) => {
+      subscriptionRow(db, userId).stripeCustomerId = customerId;
+    }),
+
+  applyStripeEvent: (event, apply) =>
+    tx(async (db) => {
+      db.stripeEvents ??= [];
+      if (db.stripeEvents.some((e) => e.id === event.id)) return false;
+      const writer: BillingWriter = {
+        userIdForCustomer: async (customerId) => (db.subscriptions ?? []).find((x) => x.stripeCustomerId === customerId)?.userId ?? null,
+        getSubscription: async (userId) => subscriptionOf(db, userId),
+        saveSubscription: async (userId, { eventAt, ...patch }) => {
+          if (!db.users.some((u) => u.id === userId)) throw new Error("Unknown user");
+          const row = subscriptionRow(db, userId);
+          if (row.lastEventAt && row.lastEventAt > eventAt) return "stale";
+          Object.assign(row, patch, { lastEventAt: eventAt });
+          return "saved";
+        },
+      };
+      // A throw here leaves the file untouched, so Stripe's retry runs the handler again.
+      await apply(writer);
+      db.stripeEvents.push({ id: event.id, type: event.type, receivedAt: now() });
+      return true;
+    }),
 };

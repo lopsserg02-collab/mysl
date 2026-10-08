@@ -13,7 +13,7 @@ const Board = dynamic(() => import("./Board").then((m) => m.Board), {
   ),
 });
 
-export function BoardClient(props: { board: { id: string; name: string; linkAccess: LinkAccess }; role: BoardRole; user: { id: string; name: string } }) {
+export function BoardClient(props: { board: { id: string; name: string; linkAccess: LinkAccess }; role: BoardRole; user: { id: string; name: string }; unread?: number }) {
   return (
     <div className="fixed inset-0">
       <Board {...props} />

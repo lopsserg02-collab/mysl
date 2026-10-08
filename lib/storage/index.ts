@@ -7,7 +7,11 @@ import path from "node:path";
 export interface Storage {
   put(storagePath: string, bytes: Uint8Array, mime: string): Promise<void>;
   get(storagePath: string): Promise<Uint8Array | null>;
+  /** Delete files for good (trash purge). Unknown paths are ignored. */
+  remove(storagePaths: string[]): Promise<void>;
 }
+
+const localFile = (p: string) => path.join(process.env.DATA_DIR ?? path.join(process.cwd(), ".data"), "assets", p);
 
 const SAFE = /^[0-9a-f-]{36}\/[0-9a-f-]{36}\.(png|jpg|gif|webp)$/;
 
@@ -25,6 +29,9 @@ const local: Storage = {
     } catch {
       return null;
     }
+  },
+  async remove(paths) {
+    await Promise.all(paths.filter((p) => SAFE.test(p)).map((p) => fs.rm(localFile(p), { force: true })));
   },
 };
 
@@ -54,6 +61,18 @@ const supabase: Storage = {
       headers: authHeaders(),
     });
     return res.ok ? new Uint8Array(await res.arrayBuffer()) : null;
+  },
+  async remove(paths) {
+    const prefixes = paths.filter((p) => SAFE.test(p));
+    // The Storage API deletes up to 1000 objects per call.
+    for (let i = 0; i < prefixes.length; i += 1000) {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/${BUCKET}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ prefixes: prefixes.slice(i, i + 1000) }),
+      });
+      if (!res.ok) throw new Error(`Storage delete failed: ${res.status}`);
+    }
   },
 };
 

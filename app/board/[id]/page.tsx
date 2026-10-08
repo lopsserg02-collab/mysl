@@ -2,6 +2,7 @@ import Link from "next/link";
 import { data } from "@/lib/data";
 import { currentUser, requireUser } from "@/lib/session";
 import { BoardClient } from "@/components/board/BoardClient";
+import { checkEditorSeat } from "@/lib/billing/limits";
 
 export async function generateMetadata({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -17,8 +18,10 @@ export default async function BoardPage({ params }: { params: Promise<{ id: stri
   const user = await requireUser(`/board/${id}`);
   const valid = /^[0-9a-f-]{36}$/.test(id);
   const [board, member] = valid ? await Promise.all([data.getBoard(id), data.getRole(id, user.id)]) : [null, null];
-  // Not on the board yet: a link that is open to signed-in people adds them.
-  const role = member ?? (board && board.linkAccess !== "private" ? await data.joinViaLink(user.id, id) : null);
+  // Not on the board yet: a link that is open to signed-in people adds them. An edit link adds a
+  // commenter instead once the owner's plan has no editor seats left.
+  const capped = !member && board?.linkAccess === "edit" && !(await checkEditorSeat(data, id, { userId: user.id })).ok;
+  const role = member ?? (board && board.linkAccess !== "private" ? await data.joinViaLink(user.id, id, capped ? { maxRole: "commenter" } : undefined) : null);
 
   if (!board || !role) {
     return (
@@ -30,6 +33,6 @@ export default async function BoardPage({ params }: { params: Promise<{ id: stri
     );
   }
 
-  await data.markOpened(user.id, id);
-  return <BoardClient board={{ id: board.id, name: board.name, linkAccess: board.linkAccess }} role={role} user={{ id: user.id, name: user.name }} />;
+  const [, unread] = await Promise.all([data.markOpened(user.id, id), data.unreadNotifications(user.id)]);
+  return <BoardClient board={{ id: board.id, name: board.name, linkAccess: board.linkAccess }} role={role} user={{ id: user.id, name: user.name }} unread={unread} />;
 }

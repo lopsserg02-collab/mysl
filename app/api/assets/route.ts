@@ -5,6 +5,7 @@ import { data } from "@/lib/data";
 import { canEditBoard } from "@/lib/data/types";
 import { currentUser } from "@/lib/session";
 import { MAX_UPLOAD, sniffImage, storage } from "@/lib/storage";
+import { checkStorage } from "@/lib/billing/limits";
 
 // Upload one image to a board. Editors only; type is checked from the bytes.
 export async function POST(req: Request) {
@@ -16,6 +17,9 @@ export async function POST(req: Request) {
   if (!boardId.success || !(file instanceof File)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
   if (!canEditBoard(await data.getRole(boardId.data, user.id))) return NextResponse.json({ error: "forbidden" }, { status: 403 });
   if (file.size === 0 || file.size > MAX_UPLOAD) return NextResponse.json({ error: "too_large" }, { status: 413 });
+  // The board owner's plan sets how much may be stored across all their boards.
+  const room = await checkStorage(data, boardId.data, file.size);
+  if (!room.ok) return NextResponse.json({ error: "plan_limit", limit: "storage", max: room.plan.storageBytes, upgrade: "/pricing" }, { status: 402 });
   const bytes = new Uint8Array(await file.arrayBuffer());
   const kind = sniffImage(bytes);
   if (!kind) return NextResponse.json({ error: "unsupported" }, { status: 415 });

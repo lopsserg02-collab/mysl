@@ -1,0 +1,98 @@
+-- Notifications panel, invite notifications, board duplicate and trash purge.
+-- The notifications table itself comes from 0001 (row level security on, policy notifications_own:
+-- a person reads and changes only rows with their own user_id). Anything that crosses users goes
+-- through the security definer functions below, each of which checks the caller first.
+
+-- An index for the panel, which lists read and unread rows together.
+create index if not exists notifications_user_created on notifications (user_id, created_at desc);
+
+-- The panel: the caller's own notifications on boards they can still open, with the board name,
+-- who did it and the comment text. Profiles and comments are private, hence security definer.
+create or replace function my_notifications(lim int default 50)
+returns table (id uuid, kind text, board_id uuid, board_name text, actor_name text, excerpt text, read boolean, created_at timestamptz)
+language sql stable security definer set search_path = public as $$
+  select n.id, n.kind, n.board_id, b.name, coalesce(p.name, ''), coalesce(c.body, ''), n.read_at is not null, n.created_at
+    from notifications n
+    join boards b on b.id = n.board_id and b.deleted_at is null
+    left join profiles p on p.id = n.actor_id
+    left join comments c on c.id = n.comment_id
+   where n.user_id = auth.uid()
+     and n.kind in ('mention', 'invite')
+     and board_role(n.board_id, auth.uid()) is not null
+   order by n.created_at desc
+   limit least(greatest(coalesce(lim, 50), 1), 200);
+$$;
+
+-- Sharing with someone who already has an account adds them at once and tells them so.
+create or replace function share_board(b uuid, invitee text, new_role text) returns text
+language plpgsql security definer set search_path = public as $$
+declare
+  key text := lower(trim(invitee));
+  uid uuid;
+  existed boolean;
+begin
+  if coalesce(board_role(b, auth.uid()), '') not in ('owner', 'coowner') then raise exception 'no access' using errcode = '42501'; end if;
+  if new_role not in ('editor', 'commenter', 'viewer') then raise exception 'bad role' using errcode = '22023'; end if;
+  select id into uid from profiles where email = key;
+  if uid is not null then
+    existed := exists (select 1 from board_members where board_id = b and user_id = uid);
+    insert into board_members (board_id, user_id, role) values (b, uid, new_role)
+      on conflict (board_id, user_id) do update set role = excluded.role
+      where board_members.role not in ('owner', 'coowner');
+    if not existed and uid <> auth.uid() then
+      insert into notifications (user_id, kind, board_id, actor_id) values (uid, 'invite', b, auth.uid());
+    end if;
+    return 'added';
+  end if;
+  insert into board_invites (board_id, email, role, invited_by) values (b, key, new_role, auth.uid())
+    on conflict (board_id, email) do update set role = excluded.role, accepted_at = null;
+  return 'invited';
+end;
+$$;
+
+-- New accounts pick up the invites waiting for their address, and see who invited them.
+create or replace function handle_new_user() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  team uuid;
+  display text := coalesce(nullif(new.raw_user_meta_data->>'name', ''), nullif(new.raw_user_meta_data->>'full_name', ''), split_part(new.email, '@', 1));
+begin
+  insert into profiles (id, name, email) values (new.id, display, lower(new.email));
+  insert into teams (name, created_by) values (display, new.id) returning id into team;
+  insert into team_members (team_id, user_id, role) values (team, new.id, 'owner');
+  insert into board_members (board_id, user_id, role)
+    select board_id, new.id, role from board_invites where email = lower(new.email) and accepted_at is null
+    on conflict do nothing;
+  insert into notifications (user_id, kind, board_id, actor_id)
+    select new.id, 'invite', board_id, invited_by from board_invites where email = lower(new.email) and accepted_at is null;
+  update board_invites set accepted_at = now() where email = lower(new.email) and accepted_at is null;
+  return new;
+end;
+$$;
+
+-- Duplicate: the copy's images get their own asset rows over the same stored files, so a file
+-- can now belong to several rows. The trash purge deletes a file only when no row uses it.
+alter table assets drop constraint if exists assets_storage_path_key;
+create index if not exists assets_storage_path on assets (storage_path);
+
+-- Board content is written only by the realtime server (no client policies on board_docs).
+-- Duplicating reads the source content as someone who may edit it...
+create or replace function board_doc_state(b uuid) returns bytea
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if coalesce(board_role(b, auth.uid()), '') not in ('owner', 'coowner', 'editor') then raise exception 'no access' using errcode = '42501'; end if;
+  return (select state from board_docs where board_id = b);
+end;
+$$;
+
+-- ...and writes the first content of the copy, which only its owner may do, and only once.
+create or replace function seed_board_doc(b uuid, s bytea) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if coalesce(board_role(b, auth.uid()), '') <> 'owner' then raise exception 'no access' using errcode = '42501'; end if;
+  insert into board_docs (board_id, state, updated_at) values (b, s, now());
+end;
+$$;
+
+revoke execute on function my_notifications(int), board_doc_state(uuid), seed_board_doc(uuid, bytea) from public, anon;
+grant execute on function my_notifications(int), board_doc_state(uuid), seed_board_doc(uuid, bytea), share_board(uuid, text, text) to authenticated;

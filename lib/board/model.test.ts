@@ -61,7 +61,7 @@ test("text shrinks to fit and never overflows", () => {
   assert.ok(lines.length * long * 1.3 <= 170);
 });
 
-import { addItem, anchorOn, connectorPoints, itemsInside, simplify, type ConnectorItem, type FrameItem, type ShapeItem } from "./model";
+import { addItem, anchorOn, connectorPoints, itemsInside, simplify, type Box, type ConnectorItem, type FrameItem, type ShapeItem } from "./model";
 
 test("deleting an item removes the connectors attached to it", () => {
   const d = new Y.Doc();
@@ -108,4 +108,85 @@ test("frames, shapes: items fully inside a frame move with it; frames render fir
   addSticky(d, { x: 290, y: 290 }, "u"); // sticks out of the frame
   assert.equal(readAll(d)[0].id, f.id);
   assert.deepEqual(itemsInside(f, readAll(d), f.id), [s.id]);
+});
+
+import { groupItems, ungroupItems, withGroups, nextStyle, lassoHits, pointInPolygon, type TextItem } from "./model";
+import { seedGrid } from "./bench";
+
+const conn = (from: string, to: string, route: ConnectorItem["route"] = "straight") =>
+  ({ type: "connector", x: 0, y: 0, w: 0, h: 0, from: { itemId: from, x: 0, y: 0 }, to: { itemId: to, x: 0, y: 0 }, route, endArrow: true, startArrow: false, stroke: "#000", label: "" }) as const;
+
+test("text style flags are stored on the item and toggle for the whole selection", () => {
+  const d = new Y.Doc();
+  const a = addItem<TextItem>(d, { type: "text", x: 0, y: 0, w: 60, h: 26, text: "a", fontSize: 20, color: "#000" }, "u");
+  const b = addItem<TextItem>(d, { type: "text", x: 0, y: 40, w: 60, h: 26, text: "b", fontSize: 20, color: "#000", bold: true }, "u");
+  assert.equal(nextStyle(readAll(d), "bold"), true); // mixed: turn on for all
+  updateItems(d, [a.id, b.id].map((id) => ({ id, patch: { bold: true, italic: true } })));
+  assert.equal(nextStyle(readAll(d), "bold"), false);
+  updateItems(d, [{ id: a.id, patch: { bold: undefined } }]); // undefined removes the field
+  const read = readAll(d).find((i) => i.id === a.id) as TextItem;
+  assert.equal("bold" in read, false);
+  assert.equal(read.italic, true);
+});
+
+test("curved connector is a smooth line that leaves and arrives perpendicular to the attached sides", () => {
+  const boxes: Record<string, Box> = { a: { x: 0, y: 0, w: 100, h: 100 }, b: { x: 300, y: 200, w: 100, h: 100 } };
+  const c = { ...conn("a", "b", "curved"), id: "c", z: 1, createdBy: "u", updatedAt: 0 } as ConnectorItem;
+  const pts = connectorPoints(c, (id) => boxes[id]);
+  assert.ok(pts.length > 8);
+  assert.deepEqual(pts.slice(0, 2), [100, 50]); // right side of a
+  assert.deepEqual(pts.slice(-2), [300, 250]); // left side of b
+  // leaves heading right, arrives heading right
+  assert.ok(pts[2] > pts[0] && Math.abs(pts[3] - pts[1]) < pts[2] - pts[0]);
+  assert.ok(pts.at(-2)! > pts.at(-4)!);
+  // free ends work too
+  const free = connectorPoints({ ...c, from: { x: 0, y: 0 }, to: { x: 200, y: 50 } }, () => undefined);
+  assert.deepEqual([free[0], free[1], free.at(-2), free.at(-1)], [0, 0, 200, 50]);
+});
+
+test("groups: picked, duplicated and dissolved as a whole", () => {
+  const d = new Y.Doc();
+  const a = addSticky(d, { x: 0, y: 0 }, "u");
+  const b = addSticky(d, { x: 300, y: 0 }, "u");
+  const c = addSticky(d, { x: 600, y: 0 }, "u");
+  assert.equal(groupItems(d, [a.id]), null); // one item is not a group
+  const g = groupItems(d, [a.id, b.id])!;
+  assert.ok(g);
+  assert.deepEqual(withGroups(readAll(d), [a.id]).sort(), [a.id, b.id].sort());
+  assert.deepEqual(withGroups(readAll(d), [c.id]), [c.id]);
+  const copies = duplicateItems(d, [a.id, b.id], "u");
+  const copyGroups = new Set(readAll(d).filter((i) => copies.includes(i.id)).map((i) => i.groupId));
+  assert.equal(copyGroups.size, 1);
+  assert.notEqual([...copyGroups][0], g);
+  ungroupItems(d, [b.id]);
+  assert.deepEqual(withGroups(readAll(d), [a.id]), [a.id]);
+  assert.equal(readAll(d).find((i) => i.id === a.id)!.groupId, undefined);
+  // the copies stay grouped, and deleting the group removes every member
+  assert.equal(withGroups(readAll(d), [copies[0]]).length, 2);
+  deleteItems(d, withGroups(readAll(d), [copies[0]]));
+  assert.equal(readAll(d).length, 3);
+});
+
+test("lasso picks items whose centre it encloses, frames only when fully enclosed", () => {
+  const square = [0, 0, 100, 0, 100, 100, 0, 100];
+  assert.equal(pointInPolygon({ x: 50, y: 50 }, square), true);
+  assert.equal(pointInPolygon({ x: 150, y: 50 }, square), false);
+  const d = new Y.Doc();
+  const inside = addItem<ShapeItem>(d, { type: "shape", kind: "rect", x: 100, y: 100, w: 100, h: 100, text: "", fill: "none", stroke: "#000" }, "u");
+  const outside = addItem<ShapeItem>(d, { type: "shape", kind: "rect", x: 380, y: 100, w: 100, h: 100, text: "", fill: "none", stroke: "#000" }, "u");
+  addItem<FrameItem>(d, { type: "frame", x: 50, y: 50, w: 600, h: 600, title: "" }, "u");
+  // An L-shaped lasso: its bounding box covers the second shape's centre, the lasso itself does not.
+  const lasso = [0, 0, 500, 0, 500, 120, 300, 120, 300, 300, 0, 300];
+  assert.deepEqual(lassoHits(readAll(d), lasso), [inside.id]);
+  assert.ok(!lassoHits(readAll(d), lasso).includes(outside.id));
+  assert.equal(lassoHits(readAll(d), [-10, -10, 700, -10, 700, 700, -10, 700]).length, 3);
+});
+
+test("seeding 10,000 items is one transaction", () => {
+  const d = new Y.Doc();
+  let updates = 0;
+  d.on("update", () => updates++);
+  assert.equal(seedGrid(d, 10_000, "u").length, 10_000);
+  assert.equal(updates, 1);
+  assert.equal(readAll(d).length, 10_000);
 });

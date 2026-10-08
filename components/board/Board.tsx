@@ -1,38 +1,54 @@
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Stage, Layer, Rect, Line, Arrow, Ellipse, Transformer } from "react-konva";
+import { Stage, Layer, Group, Rect, Line, Arrow, Ellipse, Transformer } from "react-konva";
 import type Konva from "konva";
 import {
   ArrowLeft, Hand, MousePointer2, StickyNote, Type, Square, Circle, Triangle, Diamond, RectangleHorizontal, MoveUpRight, Pen, Highlighter, Eraser, Frame,
   Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Copy, Trash2, BringToFront, SendToBack, WifiOff, Lock, Unlock, CornerDownRight, ArrowRight, Share2, MessageCircle, ImagePlus, Download,
+  Bold, Italic, Underline, Slash, Spline, Lasso, Group as GroupIcon, Ungroup, PanelRight,
 } from "lucide-react";
 import { canComment, type BoardRole, type LinkAccess } from "@/lib/data/types";
 import { t } from "@/lib/copy";
+import { formatBytes } from "@/lib/plans";
 import {
-  addItem, addSticky, boxOf, bringToFront, deleteItems, duplicateItems, fitImage, hasText, itemsInside, sendToBack, simplify, updateItems, bboxOfPoints,
-  type Box, type ConnectorItem, type DrawingItem, type End, type FrameItem, type ImageItem, type Item, type Patch, type ShapeItem, type ShapeKind, type TextItem,
+  addItem, addSticky, boxOf, bringToFront, deleteItems, duplicateItems, fitImage, hasText, itemsInside, itemsMap, sendToBack, simplify, updateItems, bboxOfPoints,
+  groupItems, ungroupItems, withGroups, nextStyle, lassoHits,
+  type Box, type ConnectorItem, type DrawingItem, type End, type FrameItem, type ImageItem, type Item, type Patch, type Route, type ShapeItem, type ShapeKind, type TextItem, type TextStyle,
 } from "@/lib/board/model";
+import { CLIP_MIME, copyPayload, parsePayload, pasteItems, plainText } from "@/lib/board/clipboard";
 import { CANVAS, DEFAULT_INK, INK, STICKY_COLOR_NAMES, ZOOM, stickyPair } from "@/lib/board/palette";
+import { seedGrid } from "@/lib/board/bench";
 import { renameBoard } from "@/app/actions";
 import { useBoardDoc } from "./useBoardDoc";
 import { bounds, fitTo, intersects, stepZoom, toBoard, zoomAt, type Viewport } from "./viewport";
-import { ItemView, preloadImages } from "./ItemView";
+import { ItemView, preloadImages, type Detail } from "./ItemView";
+import { FramesPanel } from "./FramesPanel";
 import { ExportDialog } from "./ExportDialog";
 import { download, fileName, renderRegion, toPdfBlob, toPngBlob, type ExportFormat, type ExportScope } from "./exportBoard";
 import { ShareDialog } from "./ShareDialog";
 import { Comments, type CommentDraft } from "./Comments";
-import { FONT, PAD, autoTextWidth, fittedFontSize, textHeight } from "./text";
+import { NotificationBell } from "../NotificationBell";
+import { FONT, PAD, fitText, fittedFontSize, fontStyleOf, textHeight } from "./text";
 
-type Tool = "select" | "hand" | "sticky" | "text" | "shape" | "connector" | "pen" | "highlighter" | "eraser" | "frame" | "comment";
+type Tool = "select" | "lasso" | "hand" | "sticky" | "text" | "shape" | "connector" | "pen" | "highlighter" | "eraser" | "frame" | "comment";
 type Pt = { x: number; y: number };
 const FONT_SIZES = [14, 20, 32, 48];
 const SHAPE_ICONS: Record<ShapeKind, typeof Square> = { rect: Square, round: RectangleHorizontal, ellipse: Circle, triangle: Triangle, diamond: Diamond };
+const ROUTE_ICONS: Record<Route, typeof Square> = { straight: Slash, elbow: CornerDownRight, curved: Spline };
+const STYLE_ICONS: Record<TextStyle, typeof Square> = { bold: Bold, italic: Italic, underline: Underline };
+// Below this zoom, items drop shadows and text: unreadable there, and the costliest part of drawing a big board.
+const LOW_DETAIL_BELOW = 0.3;
+// Items this far (in screen pixels) outside the view are still drawn, so a short pan does not show them popping in.
+const CULL_MARGIN = 200;
+// More items than this on screen: while the view moves, draw them from one bitmap (see pauseHits).
+const BITMAP_ABOVE = 3000;
 
 type Drag =
   | { kind: "pan"; start: Pt; vp: Viewport }
   | { kind: "move"; start: Pt; orig: Map<string, { x: number; y: number; from?: End; to?: End }>; moved: boolean }
   | { kind: "marquee"; start: Pt; current: Pt; base: string[] }
+  | { kind: "lasso"; points: number[]; base: string[] }
   | { kind: "create"; what: "shape" | "frame"; start: Pt; current: Pt }
   | { kind: "connect"; from: End; current: Pt; hover: string | null }
   | { kind: "draw"; points: number[] }
@@ -40,7 +56,7 @@ type Drag =
 
 const rectFrom = (a: Pt, b: Pt): Box => ({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) });
 
-export function Board({ board, role, user }: { board: { id: string; name: string; linkAccess: LinkAccess }; role: BoardRole; user: { id: string; name: string } }) {
+export function Board({ board, role, user, unread }: { board: { id: string; name: string; linkAccess: LinkAccess }; role: BoardRole; user: { id: string; name: string }; unread?: number }) {
   const [shareOpen, setShareOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState(false); // draws every item, not just what is on screen, and hides selection
@@ -50,6 +66,24 @@ export function Board({ board, role, user }: { board: { id: string; name: string
   const canRename = role === "owner" || role === "coowner";
   const { doc, provider, items, status, peers, undo, ready } = useBoardDoc(board.id, user);
 
+  // Hook for the performance benchmark (e2e/perf.spec.ts) to seed a big board: development only, or a
+  // production build made with NEXT_PUBLIC_PERF_HOOK=1 to measure without development-mode React.
+  useEffect(() => {
+    if ((process.env.NODE_ENV === "production" && process.env.NEXT_PUBLIC_PERF_HOOK !== "1") || !canEdit) return;
+    const w = window as unknown as { __mysl?: { seed: (n: number) => number; touch: () => void } };
+    w.__mysl = {
+      seed: (n) => seedGrid(doc, n, user.id).length,
+      // Moves one random sticky by a pixel, like a collaborator's edit arriving.
+      touch: () => {
+        const ids = [...itemsMap(doc).keys()];
+        const id = ids[Math.floor(Math.random() * ids.length)];
+        const m = itemsMap(doc).get(id);
+        if (m && m.get("type") !== "connector") updateItems(doc, [{ id, patch: { x: (m.get("x") as number) + 1 } }]);
+      },
+    };
+    return () => void delete w.__mysl;
+  }, [doc, user.id, canEdit]);
+
   const wrapRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
   const trRef = useRef<Konva.Transformer>(null);
@@ -57,6 +91,11 @@ export function Board({ board, role, user }: { board: { id: string; name: string
   const [vp, setVp] = useState<Viewport>({ x: 0, y: 0, scale: 1 });
   const [tool, setTool] = useState<Tool>("select");
   const [shapeKind, setShapeKind] = useState<ShapeKind>("rect");
+  const [route, setRoute] = useState<Route>("straight");
+  const [framesOpen, setFramesOpen] = useState(false);
+  const framesOpener = useRef<HTMLButtonElement>(null);
+  // Where the pointer is over the board (screen coordinates), so a paste lands under it.
+  const pointerIn = useRef<Pt | null>(null);
   const [ink, setInk] = useState(DEFAULT_INK);
   const [selected, setSelected] = useState<string[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
@@ -107,13 +146,16 @@ export function Board({ board, role, user }: { board: { id: string; name: string
   // ---------- images: picker, paste, drop ----------
   const fileInput = useRef<HTMLInputElement>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [noticePlans, setNoticePlans] = useState(false);
   const uploadImages = async (files: File[], at: Pt) => {
     const images = files.filter((f) => /^image\/(png|jpeg|gif|webp)$/.test(f.type));
     if (!canEdit) return;
     if (images.length === 0) return files.length && setNotice(t.images.unsupported);
     setNotice(t.images.uploading);
+    setNoticePlans(false);
     const added: string[] = [];
     let error: string | null = null;
+    let planLimit = false;
     for (const [n, file] of images.entries()) {
       if (file.size > 30 * 1024 * 1024) {
         error = t.images.tooLarge;
@@ -132,6 +174,12 @@ export function Board({ board, role, user }: { board: { id: string; name: string
         form.set("width", String(dims.width));
         form.set("height", String(dims.height));
         const res = await fetch("/api/assets", { method: "POST", body: form });
+        if (res.status === 402) {
+          const body = (await res.json().catch(() => ({}))) as { max?: number };
+          error = t.limits.storage(formatBytes(body.max ?? 0));
+          planLimit = true;
+          break;
+        }
         if (!res.ok) {
           error = res.status === 413 ? t.images.tooLarge : res.status === 415 ? t.images.unsupported : t.images.failed;
           continue;
@@ -149,18 +197,48 @@ export function Board({ board, role, user }: { board: { id: string; name: string
       setTool("select");
     }
     setNotice(error);
+    setNoticePlans(planLimit);
   };
 
+  // ---------- clipboard: items (our own format), then image files ----------
+  const typing = (target: EventTarget | null) => !!(target as HTMLElement)?.closest?.("input, textarea, select, [contenteditable=true], dialog");
+  const pastePoint = () => toBoard(vp, pointerIn.current ?? center);
   useEffect(() => {
+    const onCopy = (e: ClipboardEvent) => {
+      if (typing(e.target) || selected.length === 0 || editing) return;
+      if (window.getSelection()?.toString()) return; // the person selected some page text: copy that instead
+      const payload = copyPayload(items, selected);
+      if (!payload || !e.clipboardData) return;
+      e.preventDefault();
+      e.clipboardData.setData(CLIP_MIME, JSON.stringify(payload));
+      e.clipboardData.setData("text/plain", plainText(payload));
+      if (e.type === "cut") removeSelected();
+    };
     const onPaste = (e: ClipboardEvent) => {
-      if ((e.target as HTMLElement).closest?.("input, textarea, [contenteditable=true], dialog")) return;
+      if (typing(e.target)) return;
+      const payload = parsePayload(e.clipboardData?.getData(CLIP_MIME));
+      if (payload) {
+        e.preventDefault();
+        if (!canEdit) return;
+        const ids = pasteItems(doc, payload, pastePoint(), user.id);
+        undo.stopCapturing(); // a paste is its own undo step
+        setSelected(ids);
+        setTool("select");
+        return;
+      }
       const files = [...(e.clipboardData?.files ?? [])];
       if (files.length === 0) return;
       e.preventDefault();
-      void uploadImages(files, toBoard(vp, center));
+      void uploadImages(files, pastePoint());
     };
+    window.addEventListener("copy", onCopy);
+    window.addEventListener("cut", onCopy);
     window.addEventListener("paste", onPaste);
-    return () => window.removeEventListener("paste", onPaste);
+    return () => {
+      window.removeEventListener("copy", onCopy);
+      window.removeEventListener("cut", onCopy);
+      window.removeEventListener("paste", onPaste);
+    };
   });
   const editable = (id: string) => canEdit && !byId.get(id)?.locked;
 
@@ -181,9 +259,26 @@ export function Board({ board, role, user }: { board: { id: string; name: string
     deleteItems(doc, ids);
     setSelected([]);
   };
+  const groupSelected = () => {
+    if (!canEdit) return;
+    const ids = selected.filter(editable);
+    if (groupItems(doc, ids)) setSelected(ids);
+  };
+  const ungroupSelected = () => {
+    if (canEdit) ungroupItems(doc, selected.filter(editable));
+  };
+  /** Bold, italic or underline on the selected text items (or the one being edited); sizes follow the new width of the words. */
+  const toggleStyle = (key: TextStyle, ids = selected) => {
+    if (!canEdit) return;
+    const texts = ids.map((id) => byId.get(id)).filter((i): i is TextItem => i?.type === "text" && !i.locked);
+    if (texts.length === 0) return;
+    const on = nextStyle(texts, key);
+    undo.stopCapturing(); // each toggle is its own undo step
+    updateItems(doc, texts.map((i) => ({ id: i.id, patch: { [key]: on || undefined, ...fitText(i, { [key]: on }) } })));
+  };
   const duplicateSelected = () => {
     if (!canEdit || selected.length === 0) return;
-    setSelected(duplicateItems(doc, selected, user.id));
+    setSelected(duplicateItems(doc, withGroups(items, selected), user.id));
   };
   const patchSelected = (patch: Patch) => updateItems(doc, selected.filter(editable).map((id) => ({ id, patch })));
   const nudge = (dx: number, dy: number) => {
@@ -239,6 +334,13 @@ export function Board({ board, role, user }: { board: { id: string; name: string
         } else if (k === "0") {
           e.preventDefault();
           setVp((v) => zoomAt(v, center, 1));
+        } else if (k === "g") {
+          e.preventDefault();
+          if (e.shiftKey) ungroupSelected();
+          else groupSelected();
+        } else if ((k === "b" || k === "i" || k === "u") && selected.some((id) => byId.get(id)?.type === "text")) {
+          e.preventDefault();
+          toggleStyle(k === "b" ? "bold" : k === "i" ? "italic" : "underline");
         } else if (e.shiftKey && k === "l") {
           e.preventDefault();
           const allLocked = selected.every((id) => byId.get(id)?.locked);
@@ -252,9 +354,9 @@ export function Board({ board, role, user }: { board: { id: string; name: string
         if (box) setVp(fitTo(box, size));
         return;
       }
-      const tools: Record<string, Tool> = { v: "select", h: "hand", n: "sticky", t: "text", s: "shape", l: "connector", p: "pen", e: "eraser" };
+      const tools: Record<string, Tool> = { v: "select", o: "lasso", h: "hand", n: "sticky", t: "text", s: "shape", l: "connector", p: "pen", e: "eraser" };
       if (tools[k]) {
-        if (canEdit || tools[k] === "select" || tools[k] === "hand") setTool(tools[k]);
+        if (canEdit || tools[k] === "select" || tools[k] === "hand" || tools[k] === "lasso") setTool(tools[k]);
         return;
       }
       if (k === "c") {
@@ -271,6 +373,10 @@ export function Board({ board, role, user }: { board: { id: string; name: string
           e.preventDefault();
           return removeSelected();
         case "Escape":
+          if (framesOpen) {
+            setFramesOpen(false);
+            framesOpener.current?.focus();
+          }
           setSelected([]);
           return setTool("select");
         case "Enter":
@@ -353,6 +459,11 @@ export function Board({ board, role, user }: { board: { id: string; name: string
       return;
     }
     const b = toBoard(vp, p);
+    if (tool === "lasso") {
+      setDrag({ kind: "lasso", points: [b.x, b.y], base: e.evt.shiftKey ? selected : [] });
+      if (!e.evt.shiftKey) setSelected([]);
+      return;
+    }
     if (tool === "comment") {
       // A pin on an item sticks to it; elsewhere it stays where it was dropped.
       const id = itemAt(e.target);
@@ -392,9 +503,11 @@ export function Board({ board, role, user }: { board: { id: string; name: string
         startMarquee(b, e.evt.shiftKey);
         return;
       }
+      // A grouped item is picked with its whole group.
+      const pick = withGroups(items, [id]);
       let next = selected;
-      if (e.evt.shiftKey) next = selected.includes(id) ? selected.filter((s) => s !== id) : [...selected, id];
-      else if (!selected.includes(id)) next = [id];
+      if (e.evt.shiftKey) next = selected.includes(id) ? selected.filter((s) => !pick.includes(s)) : [...new Set([...selected, ...pick])];
+      else if (!selected.includes(id)) next = pick;
       setSelected(next);
       if (canEdit && next.includes(id)) startMove(next, b);
       return;
@@ -404,11 +517,13 @@ export function Board({ board, role, user }: { board: { id: string; name: string
 
   const shareCursor = (e: React.PointerEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
+    pointerIn.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     const b = toBoard(vp, { x: e.clientX - rect.left, y: e.clientY - rect.top });
     cancelAnimationFrame(cursorFrame.current);
     cursorFrame.current = requestAnimationFrame(() => provider?.awareness?.setLocalStateField("cursor", { x: Math.round(b.x), y: Math.round(b.y) }));
   };
   const hideCursor = () => {
+    pointerIn.current = null;
     cancelAnimationFrame(cursorFrame.current);
     provider?.awareness?.setLocalStateField("cursor", null);
   };
@@ -419,6 +534,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
     const b = toBoard(vp, p);
     switch (drag.kind) {
       case "pan":
+        pauseHits();
         return setVp({ ...drag.vp, x: drag.vp.x + (p.x - drag.start.x), y: drag.vp.y + (p.y - drag.start.y) });
       case "move": {
         const dx = Math.round(b.x - drag.start.x);
@@ -432,8 +548,15 @@ export function Board({ board, role, user }: { board: { id: string; name: string
       case "marquee": {
         const box = rectFrom(drag.start, b);
         const hits = items.filter((i) => i.type !== "connector" && intersects(box, boxOf(i)) && (i.type !== "frame" || contains(box, i))).map((i) => i.id);
-        setSelected(Array.from(new Set([...drag.base, ...hits])));
+        setSelected(Array.from(new Set([...drag.base, ...withGroups(items, hits)])));
         return setDrag({ ...drag, current: b });
+      }
+      case "lasso": {
+        const last = drag.points.length;
+        if (Math.hypot(b.x - drag.points[last - 2], b.y - drag.points[last - 1]) * vp.scale < 4) return;
+        const points = [...drag.points, b.x, b.y];
+        setSelected(Array.from(new Set([...drag.base, ...withGroups(items, lassoHits(items, points))])));
+        return setDrag({ ...drag, points });
       }
       case "create":
         return setDrag({ ...drag, current: b });
@@ -453,6 +576,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
     const d = drag;
     setDrag(null);
     if (d?.kind === "move" && d.moved) undo.stopCapturing();
+    if (d?.kind === "lasso" && selected.length > 0) setTool("select");
     if (d?.kind === "create") {
       let box = rectFrom(d.start, d.current);
       const clicked = box.w < 8 && box.h < 8;
@@ -472,7 +596,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
       const to: End = d.hover ? { itemId: d.hover, x: b.x, y: b.y } : { x: b.x, y: b.y };
       const tooShort = !d.hover && !d.from.itemId && Math.hypot(b.x - d.from.x, b.y - d.from.y) < 10;
       if (!tooShort && !(d.hover && d.hover === d.from.itemId)) {
-        const c = addItem<ConnectorItem>(doc, { type: "connector", x: 0, y: 0, w: 0, h: 0, from: d.from, to, route: "straight", endArrow: true, startArrow: false, stroke: ink, label: "" }, user.id);
+        const c = addItem<ConnectorItem>(doc, { type: "connector", x: 0, y: 0, w: 0, h: 0, from: d.from, to, route, endArrow: true, startArrow: false, stroke: ink, label: "" }, user.id);
         setSelected([c.id]);
       }
       setTool("select");
@@ -499,18 +623,70 @@ export function Board({ board, role, user }: { board: { id: string; name: string
     }
   };
 
-  const onWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
-    e.evt.preventDefault();
-    const p = pointer();
-    if (e.evt.ctrlKey || e.evt.metaKey) {
-      const factor = Math.exp(-e.evt.deltaY * 0.01); // trackpad pinch arrives as ctrl+wheel
+  // While the view moves, the layer stops hit-testing: Konva would redraw its hit canvas and read pixels back
+  // on every wheel event and pointer move, which costs more than drawing the board. It resumes once the view
+  // has been still for a moment, or right away when a pointer goes down.
+  // With thousands of items on screen, the items are also drawn once into a bitmap that moves with the view
+  // until it settles, instead of drawing every item on every frame.
+  const layerRef = useRef<Konva.Layer>(null);
+  const itemsRef = useRef<Konva.Group>(null);
+  const motion = useRef({ count: 0, scale: 1 }); // what is on screen, for the bitmap decision
+  const settle = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const resumeHits = useCallback(() => {
+    clearTimeout(settle.current);
+    const group = itemsRef.current;
+    if (group?.isCached()) {
+      group.clearCache();
+      group.getLayer()?.batchDraw();
+    }
+    const layer = layerRef.current;
+    if (layer && !layer.listening()) {
+      layer.listening(true);
+      layer.drawHit();
+    }
+  }, []);
+  const pauseHits = useCallback(() => {
+    layerRef.current?.listening(false);
+    const group = itemsRef.current;
+    const { count, scale } = motion.current;
+    if (group && !group.isCached() && count > BITMAP_ABOVE) {
+      const r = group.getClientRect({ relativeTo: group });
+      const ratio = scale * (window.devicePixelRatio || 1);
+      if (r.width * ratio < 4096 && r.height * ratio < 4096) group.cache({ pixelRatio: ratio });
+    }
+    clearTimeout(settle.current);
+    settle.current = setTimeout(resumeHits, 150);
+  }, [resumeHits]);
+
+  // Wheel and trackpad: handled before Konva sees the event, so it does not hit-test for it.
+  const onWheel = useRef<(e: WheelEvent) => void>(() => {});
+  onWheel.current = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    pauseHits();
+    const rect = wrapRef.current!.getBoundingClientRect();
+    const p = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    if (e.ctrlKey || e.metaKey) {
+      const factor = Math.exp(-e.deltaY * 0.01); // trackpad pinch arrives as ctrl+wheel
       setVp((v) => zoomAt(v, p, v.scale * factor));
     } else {
-      const dx = e.evt.shiftKey ? e.evt.deltaY : e.evt.deltaX;
-      const dy = e.evt.shiftKey ? 0 : e.evt.deltaY;
+      const dx = e.shiftKey ? e.deltaY : e.deltaX;
+      const dy = e.shiftKey ? 0 : e.deltaY;
       setVp((v) => ({ ...v, x: v.x - dx, y: v.y - dy }));
     }
   };
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const wheel = (e: WheelEvent) => onWheel.current(e);
+    const down = () => resumeHits();
+    el.addEventListener("wheel", wheel, { capture: true, passive: false });
+    el.addEventListener("pointerdown", down, { capture: true });
+    return () => {
+      el.removeEventListener("wheel", wheel, { capture: true });
+      el.removeEventListener("pointerdown", down, { capture: true });
+    };
+  }, [resumeHits]);
 
   const onDblClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
     const { x, y, prev } = lastDown.current;
@@ -533,16 +709,21 @@ export function Board({ board, role, user }: { board: { id: string; name: string
     const i = byId.get(id);
     return i && i.type !== "connector" && editable(id);
   });
+  const resizableKey = resizable.join(",");
+  const transformable = !editing && tool === "select";
   useEffect(() => {
     const tr = trRef.current;
     const stage = stageRef.current;
     if (!tr || !stage) return;
-    const nodes = !editing && tool === "select" ? resizable.map((id) => stage.findOne(`#item-${id}`)).filter((n): n is Konva.Node => Boolean(n)) : [];
+    const nodes = transformable ? resizableKey.split(",").filter(Boolean).map((id) => stage.findOne(`#item-${id}`)).filter((n): n is Konva.Node => Boolean(n)) : [];
     tr.nodes(nodes);
     tr.getLayer()?.batchDraw();
-  });
+  }, [resizableKey, transformable, items, vp.scale]);
 
-  const onTransformEnd = () => {
+  // Item views get one stable callback, so a board re-render does not re-render every item.
+  const transformEnd = useRef<() => void>(() => {});
+  const onTransformEndStable = useCallback(() => transformEnd.current(), []);
+  transformEnd.current = () => {
     const tr = trRef.current;
     if (!tr) return;
     const changes = tr.nodes().map((n) => {
@@ -556,7 +737,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
       const patch: Patch = { x: Math.round(n.x()), y: Math.round(n.y()), w, h };
       if (i.type === "drawing") patch.points = i.points.map((v, k) => (k % 2 ? v * sy : v * sx));
       if (i.type === "text") {
-        patch.h = textHeight(i.text, w, i.fontSize);
+        patch.h = textHeight(i.text, w, i.fontSize, fontStyleOf(i));
         patch.fixedWidth = true;
       }
       return { id, patch };
@@ -587,8 +768,17 @@ export function Board({ board, role, user }: { board: { id: string; name: string
   };
 
   // ---------- render ----------
-  const view = { x: -vp.x / vp.scale, y: -vp.y / vp.scale, w: size.w / vp.scale, h: size.h / vp.scale };
-  const visible = exporting ? items : items.filter((i) => i.type === "connector" || intersects(view, boxOf(i)));
+  // Viewport culling: only items in or near the view are drawn (all of them while exporting).
+  const margin = CULL_MARGIN / vp.scale;
+  const view = { x: -vp.x / vp.scale - margin, y: -vp.y / vp.scale - margin, w: size.w / vp.scale + margin * 2, h: size.h / vp.scale + margin * 2 };
+  const culled = exporting ? items : items.filter((i) => intersects(view, i.type === "connector" ? connectorBox(i, lookup) : i));
+  // Same items in view as last render: keep the same array, so a pan that reveals nothing new skips the items layer.
+  const lastVisible = useRef<Item[]>([]);
+  const prevVisible = lastVisible.current;
+  const visible = culled.length === prevVisible.length && culled.every((v, k) => v === prevVisible[k]) ? prevVisible : culled;
+  lastVisible.current = visible;
+  motion.current = { count: visible.length, scale: vp.scale };
+  const detail: Detail = vp.scale < LOW_DETAIL_BELOW && !exporting ? "low" : "full";
   const peerSelections = peers.flatMap((p) => p.selection.map((id) => ({ id, color: p.color.fill })));
   const editingItem = editing ? byId.get(editing) : undefined;
   const selItems = selected.map((id) => byId.get(id)).filter((i): i is Item => Boolean(i));
@@ -598,6 +788,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
   const drawingTool = tool === "pen" || tool === "highlighter";
   const cursorStyle = drag?.kind === "pan" ? "grabbing" : tool === "hand" || spaceDown ? "grab" : tool === "select" ? "default" : "crosshair";
   const types = new Set(selItems.map((i) => i.type));
+  const groups = new Set(selItems.map((i) => i.groupId).filter(Boolean));
   const allLocked = selItems.length > 0 && selItems.every((i) => i.locked);
 
   return (
@@ -618,15 +809,22 @@ export function Board({ board, role, user }: { board: { id: string; name: string
         void uploadImages([...e.dataTransfer.files], toBoard(vp, { x: e.clientX - rect.left, y: e.clientY - rect.top }));
       }}
     >
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0"
-        style={{
-          backgroundImage: gridStep >= 8 ? "radial-gradient(var(--color-canvas-grid) 1.2px, transparent 1.2px)" : undefined,
-          backgroundSize: `${gridStep}px ${gridStep}px`,
-          backgroundPosition: `${vp.x}px ${vp.y}px`,
-        }}
-      />
+      {/* Dot grid: a layer one cell larger than the view, moved by transform so panning does not repaint it. */}
+      {gridStep >= 8 && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute will-change-transform"
+          style={{
+            left: -gridStep,
+            top: -gridStep,
+            width: size.w + gridStep * 2,
+            height: size.h + gridStep * 2,
+            backgroundImage: "radial-gradient(var(--color-canvas-grid) 1.2px, transparent 1.2px)",
+            backgroundSize: `${gridStep}px ${gridStep}px`,
+            transform: `translate3d(${mod(vp.x, gridStep)}px, ${mod(vp.y, gridStep)}px, 0)`,
+          }}
+        />
+      )}
 
       <div ref={wrapRef} className="absolute inset-0" onContextMenu={(e) => e.preventDefault()}>
         {size.w > 0 && (
@@ -641,25 +839,30 @@ export function Board({ board, role, user }: { board: { id: string; name: string
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
-            onWheel={onWheel}
             onDblClick={onDblClick}
             role="application"
             aria-label="Доска"
           >
-            <Layer>
-              {visible.map((i) => (
-                <ItemView key={i.id} item={i} editing={editing === i.id} scale={vp.scale} lookup={lookup} onTransformEnd={onTransformEnd} />
-              ))}
+            <Layer ref={layerRef}>
+              <Group ref={itemsRef}>
+                <Items visible={visible} byId={byId} editing={editing} scale={vp.scale} detail={detail} onTransformEnd={onTransformEndStable} />
+              </Group>
               {!exporting && peerSelections.map(({ id, color }) => {
                 const i = byId.get(id);
                 if (!i) return null;
                 const b = i.type === "connector" ? connectorBox(i, lookup) : boxOf(i);
                 return <Rect key={`peer-${id}-${color}`} x={b.x - 3} y={b.y - 3} width={b.w + 6} height={b.h + 6} stroke={color} strokeWidth={2 / vp.scale} listening={false} />;
               })}
-              {!exporting && selItems.filter((i) => i.type === "connector" || i.locked || selItems.length > 1).map((i) => {
+              {!exporting && selItems.filter((i) => i.type === "connector" || i.locked || (selItems.length > 1 && !i.groupId)).map((i) => {
                 const b = i.type === "connector" ? connectorBox(i, lookup) : boxOf(i);
                 const pad = 4 / vp.scale;
                 return <Rect key={`sel-${i.id}`} x={b.x - pad} y={b.y - pad} width={b.w + pad * 2} height={b.h + pad * 2} stroke={CANVAS.selection} strokeWidth={1.5 / vp.scale} dash={i.locked ? [4 / vp.scale, 3 / vp.scale] : undefined} listening={false} />;
+              })}
+              {/* A selected group gets one solid outline around all of its members. */}
+              {!exporting && [...new Set(selItems.map((i) => i.groupId).filter((g): g is string => !!g))].map((g) => {
+                const b = bounds(selItems.filter((i) => i.groupId === g).map((i) => (i.type === "connector" ? connectorBox(i, lookup) : boxOf(i))))!;
+                const pad = 8 / vp.scale;
+                return <Rect key={`group-${g}`} x={b.x - pad} y={b.y - pad} width={b.w + pad * 2} height={b.h + pad * 2} stroke={CANVAS.selection} strokeWidth={1.5 / vp.scale} listening={false} />;
               })}
               <DragPreview drag={drag} scale={vp.scale} shapeKind={shapeKind} ink={ink} highlighter={tool === "highlighter"} lookup={lookup} />
               <Transformer
@@ -687,13 +890,10 @@ export function Board({ board, role, user }: { board: { id: string; name: string
           vp={vp}
           onChange={(text) => {
             const patch: Patch = { text };
-            if (editingItem.type === "text") {
-              const w = editingItem.fixedWidth ? editingItem.w : autoTextWidth(text, editingItem.fontSize);
-              patch.w = w;
-              patch.h = textHeight(text, w, editingItem.fontSize);
-            }
+            if (editingItem.type === "text") Object.assign(patch, fitText(editingItem, { text }));
             updateItems(doc, [{ id: editingItem.id, patch }]);
           }}
+          onStyle={(key) => toggleStyle(key, [editingItem.id])}
           onDone={(text) => {
             setEditing(null);
             // An empty text box is removed when you leave it, like a cancelled note.
@@ -726,11 +926,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
       })()}
 
       {/* What the canvas shows, for screen readers (and tests). */}
-      <ul aria-label="Объекты на доске" className="sr-only">
-        {items.map((i) => (
-          <li key={i.id}>{describe(i)}</li>
-        ))}
-      </ul>
+      <ItemList items={items} />
 
       <div aria-hidden className="pointer-events-none absolute inset-0">
         {peers.map((p) =>
@@ -781,6 +977,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
           {peers.map((p) => (
             <Avatar key={p.clientId} name={p.name} color={p.color.fill} label={p.name} />
           ))}
+          <NotificationBell initialUnread={unread} />
           <button
             type="button"
             onClick={() => setExportOpen(true)}
@@ -816,6 +1013,9 @@ export function Board({ board, role, user }: { board: { id: string; name: string
       {notice && (
         <div role="status" className="absolute bottom-16 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-md bg-bg px-3 py-2 text-sm shadow-pop">
           {notice}
+          {noticePlans && (
+            <Link href="/pricing" target="_blank" className="shrink-0 font-medium text-accent underline underline-offset-2">{t.limits.seePlans}</Link>
+          )}
           {notice !== t.images.uploading && (
             <button type="button" aria-label={t.comments.close} onClick={() => setNotice(null)} className="text-text-muted hover:text-text">×</button>
           )}
@@ -844,6 +1044,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
 
       <nav aria-label="Инструменты" className="absolute left-3 top-1/2 flex max-h-[calc(100%-140px)] -translate-y-1/2 flex-col gap-1 overflow-y-auto rounded-md bg-bg p-1 shadow-toolbar">
         <ToolButton label={t.board.select} active={tool === "select"} onClick={() => setTool("select")}><MousePointer2 size={20} /></ToolButton>
+        <ToolButton label={t.board.lasso} active={tool === "lasso"} onClick={() => setTool("lasso")}><Lasso size={20} /></ToolButton>
         <ToolButton label={t.board.hand} active={tool === "hand"} onClick={() => setTool("hand")}><Hand size={20} /></ToolButton>
         {mayComment && <ToolButton label={t.comments.tool} active={tool === "comment"} onClick={() => setTool("comment")}><MessageCircle size={20} /></ToolButton>}
         {canEdit && (
@@ -870,6 +1071,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
             (Object.keys(SHAPE_ICONS) as ShapeKind[]).map((k) => (
               <ToolButton key={k} small label={t.board.shapes[k]} active={shapeKind === k} onClick={() => setShapeKind(k)}><ShapeIcon kind={k} size={16} /></ToolButton>
             ))}
+          {tool === "connector" && <RoutePicker value={route} onChange={setRoute} vertical />}
           <InkPicker value={ink} onChange={setInk} vertical />
         </div>
       )}
@@ -906,6 +1108,19 @@ export function Board({ board, role, user }: { board: { id: string; name: string
                 </>
               )}
               {types.size === 1 && types.has("text") && (
+                <div role="group" aria-label={t.board.textStyle} className="flex gap-0.5">
+                  {(Object.keys(STYLE_ICONS) as TextStyle[]).map((key) => {
+                    const I = STYLE_ICONS[key];
+                    return (
+                      <ToolButton key={key} small label={t.board[key]} active={selItems.every((i) => i.type === "text" && i[key])} onClick={() => toggleStyle(key)}>
+                        <I size={16} />
+                      </ToolButton>
+                    );
+                  })}
+                  <Divider />
+                </div>
+              )}
+              {types.size === 1 && types.has("text") && (
                 <div role="radiogroup" aria-label={t.board.fontSize} className="flex gap-0.5">
                   {FONT_SIZES.map((fs) => (
                     <button
@@ -913,11 +1128,7 @@ export function Board({ board, role, user }: { board: { id: string; name: string
                       role="radio"
                       aria-checked={single?.type === "text" && single.fontSize === fs}
                       onClick={() =>
-                        updateItems(doc, selItems.flatMap((i) => {
-                          if (i.type !== "text") return [];
-                          const w = i.fixedWidth ? i.w : autoTextWidth(i.text, fs);
-                          return [{ id: i.id, patch: { fontSize: fs, w, h: textHeight(i.text, w, fs) } }];
-                        }))
+                        updateItems(doc, selItems.flatMap((i) => (i.type === "text" ? [{ id: i.id, patch: { fontSize: fs, ...fitText(i, { fontSize: fs }) } }] : [])))
                       }
                       className={`h-8 min-w-8 rounded-sm px-1 text-sm ${single?.type === "text" && single.fontSize === fs ? "bg-accent-subtle text-accent" : "hover:bg-surface-hover"}`}
                     >
@@ -928,7 +1139,8 @@ export function Board({ board, role, user }: { board: { id: string; name: string
               )}
               {single?.type === "connector" && (
                 <>
-                  <ToolButton small label={t.board.route} active={single.route === "elbow"} onClick={() => patchSelected({ route: single.route === "elbow" ? "straight" : "elbow" })}><CornerDownRight size={16} /></ToolButton>
+                  <RoutePicker value={single.route} onChange={(r) => patchSelected({ route: r })} />
+                  <Divider />
                   <ToolButton small label={t.board.arrow} active={single.endArrow} onClick={() => patchSelected({ endArrow: !single.endArrow })}><ArrowRight size={16} /></ToolButton>
                 </>
               )}
@@ -942,6 +1154,10 @@ export function Board({ board, role, user }: { board: { id: string; name: string
                 </>
               )}
               <Divider />
+              {selItems.length > 1 && !(groups.size === 1 && selItems.every((i) => i.groupId)) && (
+                <ToolButton small label={t.board.group} onClick={groupSelected}><GroupIcon size={16} /></ToolButton>
+              )}
+              {groups.size > 0 && <ToolButton small label={t.board.ungroup} onClick={ungroupSelected}><Ungroup size={16} /></ToolButton>}
               <ToolButton small label={t.board.duplicate} onClick={duplicateSelected}><Copy size={16} /></ToolButton>
               <ToolButton small label={t.board.front} onClick={() => bringToFront(doc, selected)}><BringToFront size={16} /></ToolButton>
               <ToolButton small label={t.board.back2} onClick={() => sendToBack(doc, selected)}><SendToBack size={16} /></ToolButton>
@@ -967,12 +1183,34 @@ export function Board({ board, role, user }: { board: { id: string; name: string
         </button>
         <ToolButton label={t.board.zoomIn} onClick={() => setVp((v) => stepZoom(v, 1, center))}><ZoomIn size={18} /></ToolButton>
         <ToolButton label={t.board.fit} onClick={fitAll}><Maximize size={18} /></ToolButton>
+        <ToolButton label={t.frames.open} active={framesOpen} onClick={() => setFramesOpen((o) => !o)} buttonRef={framesOpener}><PanelRight size={18} /></ToolButton>
       </div>
+      {framesOpen && (
+        <FramesPanel
+          frames={items.filter((i): i is FrameItem => i.type === "frame")}
+          canRename={canEdit}
+          current={single?.type === "frame" ? single.id : null}
+          onShow={(f) => {
+            // Fit the frame into the part of the board the panel leaves free.
+            setVp(fitTo(boxOf(f), { w: Math.max(200, size.w - 384), h: size.h }, 60));
+            setSelected([f.id]);
+          }}
+          onRename={(id, title) => {
+            if (byId.get(id)?.type === "frame" && editable(id) && (byId.get(id) as FrameItem).title !== title) updateItems(doc, [{ id, patch: { title } }]);
+          }}
+          onClose={() => {
+            setFramesOpen(false);
+            framesOpener.current?.focus();
+          }}
+        />
+      )}
     </div>
   );
 }
 
 // ---------- helpers ----------
+
+const mod = (a: number, n: number) => ((a % n) + n) % n;
 
 function shiftEnd(e: End, dx: number, dy: number): End {
   return e.itemId ? e : { x: e.x + dx, y: e.y + dy };
@@ -995,16 +1233,18 @@ function connectorBox(c: ConnectorItem, lookup: (id: string) => Box | undefined)
 }
 
 function describe(i: Item): string {
-  const lock = i.locked ? " (закреплено)" : "";
+  const lock = (i.locked ? " (закреплено)" : "") + (i.groupId ? ` (${t.board.inGroup})` : "");
   switch (i.type) {
     case "sticky":
       return `Стикер: ${i.text || "пустой"}${lock}`;
-    case "text":
-      return `Текст: ${i.text}${lock}`;
+    case "text": {
+      const style = [i.bold && "жирный", i.italic && "курсив", i.underline && "подчёркнутый"].filter(Boolean).join(", ");
+      return `Текст${style ? ` (${style})` : ""}: ${i.text}${lock}`;
+    }
     case "shape":
       return `Фигура ${t.board.shapes[i.kind]}: ${i.text || "без текста"}${lock}`;
     case "connector":
-      return `Линия${i.from.itemId && i.to.itemId ? " между объектами" : ""}${i.label ? `: ${i.label}` : ""}${lock}`;
+      return `Линия${i.route === "curved" ? " плавная" : i.route === "elbow" ? " ломаная" : ""}${i.from.itemId && i.to.itemId ? " между объектами" : ""}${i.label ? `: ${i.label}` : ""}${lock}`;
     case "drawing":
       return `Рисунок${i.highlighter ? " маркером" : ""}${lock}`;
     case "frame":
@@ -1027,7 +1267,10 @@ function DragPreview({ drag, scale, shapeKind, ink, highlighter, lookup }: { dra
   if (!drag) return null;
   if (drag.kind === "marquee") {
     const r = rectFrom(drag.start, drag.current);
-    return <Rect x={r.x} y={r.y} width={r.w} height={r.h} fill="rgba(109,40,217,.06)" stroke={CANVAS.selection} strokeWidth={1 / scale} listening={false} />;
+    return <Rect x={r.x} y={r.y} width={r.w} height={r.h} fill={CANVAS.lassoFill} stroke={CANVAS.selection} strokeWidth={1 / scale} listening={false} />;
+  }
+  if (drag.kind === "lasso") {
+    return <Line points={drag.points} closed fill={CANVAS.lassoFill} stroke={CANVAS.selection} strokeWidth={1 / scale} dash={[5 / scale, 4 / scale]} listening={false} />;
   }
   if (drag.kind === "create") {
     const r = rectFrom(drag.start, drag.current);
@@ -1053,9 +1296,75 @@ function DragPreview({ drag, scale, shapeKind, ink, highlighter, lookup }: { dra
   return null;
 }
 
-function ToolButton({ label, active, small, onClick, children }: { label: string; active?: boolean; small?: boolean; onClick: () => void; children: React.ReactNode }) {
+/** The board's items. Memoised on its props: panning re-renders it only when different items come into view. */
+const Items = memo(function Items({ visible, byId, editing, scale, detail, onTransformEnd }: { visible: Item[]; byId: Map<string, Item>; editing: string | null; scale: number; detail: Detail; onTransformEnd: () => void }) {
+  return visible.map((i) => (
+    <ItemView
+      key={i.id}
+      item={i}
+      editing={editing === i.id}
+      // Only these draw differently with zoom; the rest get a constant so zooming skips them.
+      scale={i.type === "frame" || i.type === "connector" || i.type === "drawing" ? scale : 1}
+      detail={detail}
+      from={i.type === "connector" && i.from.itemId ? byId.get(i.from.itemId) : undefined}
+      to={i.type === "connector" && i.to.itemId ? byId.get(i.to.itemId) : undefined}
+      onTransformEnd={onTransformEnd}
+    />
+  ));
+});
+
+/** What the canvas shows, for screen readers (and tests). Memoised: it only changes with the items, not on pan or zoom. */
+/** On a big board it follows the items at most twice a second, so a stream of edits does not rebuild thousands of rows. */
+const BIG_BOARD = 2000;
+const ItemList = memo(function ItemList({ items }: { items: Item[] }) {
+  const [shown, setShown] = useState(items);
+  const latest = useRef(items);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => {
+    latest.current = items;
+    if (items.length < BIG_BOARD || timer.current) return;
+    timer.current = setTimeout(() => {
+      timer.current = undefined;
+      setShown(latest.current);
+    }, 500);
+  }, [items]);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const list = items.length < BIG_BOARD ? items : shown;
+  // The same element while the list is unchanged lets React skip all of its rows.
+  return useMemo(
+    () => (
+      <ul aria-label="Объекты на доске" className="sr-only">
+        {list.map((i) => (
+          <ItemRow key={i.id} item={i} />
+        ))}
+      </ul>
+    ),
+    [list],
+  );
+});
+const ItemRow = memo(function ItemRow({ item }: { item: Item }) {
+  return <li>{describe(item)}</li>;
+});
+
+function RoutePicker({ value, onChange, vertical }: { value: Route; onChange: (r: Route) => void; vertical?: boolean }) {
+  return (
+    <div role="group" aria-label={t.board.routes.label} className={`flex gap-0.5 ${vertical ? "flex-col" : ""}`}>
+      {(Object.keys(ROUTE_ICONS) as Route[]).map((r) => {
+        const I = ROUTE_ICONS[r];
+        return (
+          <ToolButton key={r} small label={t.board.routes[r]} active={value === r} onClick={() => onChange(r)}>
+            <I size={16} />
+          </ToolButton>
+        );
+      })}
+    </div>
+  );
+}
+
+function ToolButton({ label, active, small, onClick, children, buttonRef }: { label: string; active?: boolean; small?: boolean; onClick: () => void; children: React.ReactNode; buttonRef?: React.Ref<HTMLButtonElement> }) {
   return (
     <button
+      ref={buttonRef}
       type="button"
       aria-label={label}
       title={label}
@@ -1121,7 +1430,7 @@ function InlineInput({ label, value, placeholder, style, onChange, onDone }: { l
   );
 }
 
-function TextEditor({ item, vp, onChange, onDone }: { item: Extract<Item, { text: string }>; vp: Viewport; onChange: (t: string) => void; onDone: (text: string) => void }) {
+function TextEditor({ item, vp, onChange, onDone, onStyle }: { item: Extract<Item, { text: string }>; vp: Viewport; onChange: (t: string) => void; onDone: (text: string) => void; onStyle: (key: TextStyle) => void }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     const el = ref.current;
@@ -1148,6 +1457,12 @@ function TextEditor({ item, vp, onChange, onDone }: { item: Extract<Item, { text
           e.preventDefault();
           e.currentTarget.blur();
         }
+        // Ctrl+B / I / U style the whole text item while typing.
+        const k = e.key.toLowerCase();
+        if ((e.metaKey || e.ctrlKey) && !e.altKey && free && (k === "b" || k === "i" || k === "u")) {
+          e.preventDefault();
+          onStyle(k === "b" ? "bold" : k === "i" ? "italic" : "underline");
+        }
       }}
       className={`absolute resize-none overflow-hidden border-0 bg-transparent outline-none ${free ? "text-left" : "text-center"}`}
       style={{
@@ -1161,6 +1476,9 @@ function TextEditor({ item, vp, onChange, onDone }: { item: Extract<Item, { text
         transformOrigin: "top left",
         fontFamily: FONT,
         fontSize,
+        fontWeight: free && item.bold ? 700 : undefined,
+        fontStyle: free && item.italic ? "italic" : undefined,
+        textDecoration: free && item.underline ? "underline" : undefined,
         lineHeight: 1.3,
         color: colors.text,
         background: item.type === "sticky" ? colors.fill : "transparent",

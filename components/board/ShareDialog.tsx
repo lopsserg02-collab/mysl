@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, useTransition } from "react";
+import Link from "next/link";
 import { Link2, UserPlus, X } from "lucide-react";
 import type { BoardRole, LinkAccess, Person, ShareRole } from "@/lib/data/types";
 import { cancelInvite, listPeople, setLinkAccess, setMemberRole, shareBoard } from "@/app/actions";
@@ -17,7 +18,7 @@ export function ShareDialog(props: { boardId: string; role: BoardRole; userId: s
   const [link, setLink] = useState(props.linkAccess);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<ShareRole>("editor");
-  const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null);
+  const [message, setMessage] = useState<{ text: string; error?: boolean; plans?: boolean } | null>(null);
   const [copied, setCopied] = useState(false);
   const [pending, start] = useTransition();
 
@@ -44,11 +45,20 @@ export function ShareDialog(props: { boardId: string; role: BoardRole; userId: s
       }
     });
 
+  // A plan limit says so in words and links to the plans; nothing changes on the board.
+  const limited = (res: unknown) => {
+    const r = res as { ok?: boolean; limit?: string; max?: number } | undefined;
+    if (r?.ok !== false || r.limit !== "editors") return false;
+    setMessage({ text: t.limits.editors(r.max ?? 0), error: true, plans: true });
+    return true;
+  };
+
   const invite = (e: React.FormEvent) => {
     e.preventDefault();
     const address = email.trim();
     run(async () => {
       const res = await shareBoard(boardId, address, role);
+      if (limited(res)) return;
       if (!res.ok) return setMessage({ text: t.share.errorEmail, error: true });
       setMessage({ text: res.result === "added" ? t.share.added(address) : t.share.invited(address) });
       setEmail("");
@@ -106,6 +116,12 @@ export function ShareDialog(props: { boardId: string; role: BoardRole; userId: s
         {message && (
           <p role={message.error ? "alert" : "status"} className={message.error ? "text-sm text-danger" : "text-sm text-text-muted"}>
             {message.text}
+            {message.plans && (
+              <>
+                {" "}
+                <Link href="/pricing" className="font-medium text-accent underline underline-offset-2">{t.limits.seePlans}</Link>
+              </>
+            )}
           </p>
         )}
 
@@ -155,7 +171,13 @@ export function ShareDialog(props: { boardId: string; role: BoardRole; userId: s
                         aria-label={t.share.memberRole(label)}
                         value={p.role}
                         disabled={pending}
-                        onChange={(e) => run(() => (p.pending ? shareBoard(boardId, p.email, e.target.value) : setMemberRole(boardId, p.userId!, e.target.value)))}
+                        onChange={(e) => {
+                          const next = e.target.value;
+                          run(async () => {
+                            setMessage(null);
+                            limited(await (p.pending ? shareBoard(boardId, p.email, next) : setMemberRole(boardId, p.userId!, next)));
+                          });
+                        }}
                         className="h-8 rounded-sm border border-border-input bg-bg px-1 text-sm"
                       >
                         {SHARE_ROLES.map((r) => (
