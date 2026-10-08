@@ -51,6 +51,8 @@ const LOW_DETAIL_BELOW = 0.3;
 const CULL_MARGIN = 200;
 // More items than this on screen: while the view moves, draw them from one bitmap (see pauseHits).
 const BITMAP_ABOVE = 3000;
+// Faces shown in the people bar; the rest are counted.
+const MAX_AVATARS = 4;
 
 type Drag =
   | { kind: "pan"; start: Pt; vp: Viewport }
@@ -92,9 +94,10 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   // production build made with NEXT_PUBLIC_PERF_HOOK=1 to measure without development-mode React.
   useEffect(() => {
     if ((process.env.NODE_ENV === "production" && process.env.NEXT_PUBLIC_PERF_HOOK !== "1") || !canEdit) return;
-    const w = window as unknown as { __mysl?: { seed: (n: number) => number; touch: () => void } };
+    const w = window as unknown as { __mysl?: { seed: (n: number) => number; touch: () => void; onScreen: () => number } };
     w.__mysl = {
       seed: (n) => seedGrid(doc, n, user.id).length,
+      onScreen: () => motion.current.count,
       // Moves one random sticky by a pixel, like a collaborator's edit arriving.
       touch: () => {
         const ids = [...itemsMap(doc).keys()];
@@ -1088,9 +1091,20 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
         </div>
         <div className="flex h-12 items-center gap-1 rounded-md bg-bg px-2 shadow-toolbar" aria-label="Участники">
           <Avatar name={user.name} color="var(--color-accent)" label={`${user.name} (${t.board.you})`} />
-          {peers.map((p) => (
+          {/* A few faces, then a count: fifty people must not push the bar off the screen. */}
+          {peers.slice(0, MAX_AVATARS).map((p) => (
             <Avatar key={p.clientId} name={p.name} color={p.color.fill} label={p.name} />
           ))}
+          {peers.length > MAX_AVATARS && (
+            <span
+              role="img"
+              aria-label={t.board.morePeople(peers.length - MAX_AVATARS)}
+              title={peers.slice(MAX_AVATARS).map((p) => p.name).join(", ")}
+              className="flex h-8 min-w-8 items-center justify-center rounded-full bg-surface px-1 text-xs font-semibold tabular-nums"
+            >
+              +{peers.length - MAX_AVATARS}
+            </span>
+          )}
           <NotificationBell initialUnread={unread} />
           <button
             type="button"

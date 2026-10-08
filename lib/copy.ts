@@ -437,5 +437,6 @@ export const t = {
     stickyPlaceholder: "Напишите мысль",
     emptyHint: "Нажмите N и кликните по доске, чтобы добавить стикер",
     you: "вы",
+    morePeople: (n: number) => `Ещё ${n} на доске`,
   },
 } as const;

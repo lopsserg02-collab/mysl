@@ -17,11 +17,12 @@ const RT_URL = `ws://localhost:${process.env.E2E_RT_PORT ?? 1234}`;
 const FRAMES = 120;
 
 // Tracing snapshots the page on every step and would skew the timings.
-test.use({ trace: "off" });
+// PERF_BROWSER=firefox (or webkit) measures in another engine; leave PW_CHROMIUM unset then.
+test.use({ trace: "off", ...(process.env.PERF_BROWSER ? { browserName: process.env.PERF_BROWSER as "firefox" | "webkit" } : {}) });
 
 type Mode = "pan" | "zoom" | "edit" | "idle";
 type Stats = { frames: number; meanMs: number; p50Ms: number; p95Ms: number; maxMs: number; fps: number };
-type Hook = { seed: (n: number) => number; touch: () => void };
+type Hook = { seed: (n: number) => number; touch: () => void; onScreen: () => number };
 
 /** PERF_PROFILE=1: a CPU profile of each measurement, summed by function (self time), printed to the console. */
 async function profiled<T>(page: Page, label: string, run: () => Promise<T>): Promise<T> {
@@ -166,6 +167,9 @@ test(`perf: ${N} items, pan and zoom frame times`, async ({ page }) => {
   // Whole board in view: every item is on screen, drawn in low detail.
   await page.keyboard.press("Shift+1");
   await page.waitForTimeout(500);
+  const shot = async (name: string) => process.env.PERF_SHOTS && (await page.screenshot({ path: path.join(process.env.PERF_SHOTS, `${name}.png`) }));
+  await shot("fit");
+  results.onScreenFit = await page.evaluate(() => (window as unknown as { __mysl: Partial<Hook> }).__mysl.onScreen?.() ?? null);
   results.panFit = await measure(page, "pan", "panFit");
   results.zoomFit = await measure(page, "zoom", "zoomFit");
   results.editFit = await measure(page, "edit", "editFit");
@@ -180,6 +184,7 @@ test(`perf: ${N} items, pan and zoom frame times`, async ({ page }) => {
   results.pan50 = await measure(page, "pan", "pan50");
   // 25%: a few hundred items, low detail.
   await zoomTo(page, "25%", 3);
+  await shot("25");
   results.pan25 = await measure(page, "pan", "pan25");
 
   // Other people on the board, through the realtime server.
@@ -201,10 +206,12 @@ test(`perf: ${N} items, pan and zoom frame times`, async ({ page }) => {
       return s;
     })();
     others.cursors(centre);
-    await expect(page.getByRole("img", { name: "Гость 50" })).toHaveCount(CURSORS >= 50 ? 1 : 0);
+    // Everyone is on the board: four faces and a count of the rest.
+    if (CURSORS > 4) await expect(page.getByRole("img", { name: `Ещё ${CURSORS - 4} на доске` })).toBeVisible();
     await page.waitForTimeout(500);
     results.cursors = CURSORS;
     results.cursorsIdle100 = await measure(page, "idle", "cursorsIdle100");
+    await shot("cursors");
     results.cursorsPan100 = await measure(page, "pan", "cursorsPan100");
     others.edits();
     results.cursorsRemoteEdit100 = await measure(page, "idle", "cursorsRemoteEdit100");
