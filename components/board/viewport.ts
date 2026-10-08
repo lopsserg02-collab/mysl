@@ -17,6 +17,17 @@ export function zoomAt(v: Viewport, screen: { x: number; y: number }, nextScale:
   return { scale, x: screen.x - b.x * scale, y: screen.y - b.y * scale };
 }
 
+/**
+ * How much one wheel event zooms. A mouse wheel notch (about 100 px, or 3 lines) zooms about 12 %, like the
+ * big whiteboards; a trackpad pinch sends many small deltas and keeps its finer, direct response.
+ */
+export function wheelZoomFactor(e: { deltaY: number; deltaMode: number }): { factor: number; notch: boolean } {
+  const px = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * 800 : e.deltaY;
+  const notch = e.deltaMode !== 0 || Math.abs(px) >= 40;
+  const capped = Math.max(-240, Math.min(240, px)); // one fast flick never jumps further than two notches
+  return { factor: Math.exp(-capped * (notch ? 0.0012 : 0.01)), notch };
+}
+
 export function stepZoom(v: Viewport, dir: 1 | -1, center: { x: number; y: number }): Viewport {
   const steps = ZOOM.steps;
   const next = dir > 0 ? steps.find((s) => s > v.scale + 1e-6) ?? ZOOM.max : [...steps].reverse().find((s) => s < v.scale - 1e-6) ?? ZOOM.min;

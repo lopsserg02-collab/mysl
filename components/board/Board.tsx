@@ -23,7 +23,7 @@ import { INITIAL_SIZES, clampSize, parseSizes, stepSize, strokeHits, type BrushT
 import { seedGrid } from "@/lib/board/bench";
 import { renameBoard } from "@/app/actions";
 import { useBoardDoc } from "./useBoardDoc";
-import { bounds, fitTo, intersects, stepZoom, toBoard, zoomAt, type Viewport } from "./viewport";
+import { bounds, clampScale, fitTo, intersects, stepZoom, toBoard, wheelZoomFactor, zoomAt, type Viewport } from "./viewport";
 import { ItemView, preloadImages, setGuestAssetSecret, type Detail } from "./ItemView";
 import { BulkItems } from "./BulkItems";
 import { FramesPanel } from "./FramesPanel";
@@ -125,6 +125,8 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
   const trRef = useRef<Konva.Transformer>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [vp, setVp] = useState<Viewport>({ x: 0, y: 0, scale: 1 });
+  const vpRef = useRef(vp);
+  vpRef.current = vp;
   const [tool, setTool] = useState<Tool>("select");
   const [shapeKind, setShapeKind] = useState<ShapeKind>("rect");
   const [route, setRoute] = useState<Route>("straight");
@@ -713,6 +715,37 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
     }
   };
 
+  // A drag (drawing, moving, selecting) keeps going when the pointer leaves the board, for example over a toolbar
+  // or outside the window, and ends where the button is released, instead of sticking until the next click.
+  const dragHandlers = useRef({ move: onPointerMove, up: onPointerUp });
+  dragHandlers.current = { move: onPointerMove, up: onPointerUp };
+  const dragging = drag !== null;
+  useEffect(() => {
+    if (!dragging) return;
+    const outside = (e: Event) => !stageRef.current?.container().contains(e.target as Node);
+    const move = (e: PointerEvent) => {
+      if (!outside(e)) return; // over the board Konva already handles it
+      stageRef.current?.setPointersPositions(e);
+      dragHandlers.current.move();
+    };
+    const up = (e: PointerEvent) => {
+      if (e.type === "pointerup" && !outside(e)) return;
+      stageRef.current?.setPointersPositions(e);
+      dragHandlers.current.up();
+    };
+    const lost = () => dragHandlers.current.up();
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    window.addEventListener("blur", lost);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      window.removeEventListener("blur", lost);
+    };
+  }, [dragging]);
+
   // While the view moves, the layer stops hit-testing: Konva would redraw its hit canvas and read pixels back
   // on every wheel event and pointer move, which costs more than drawing the board. It resumes once the view
   // has been still for a moment, or right away when a pointer goes down.
@@ -754,6 +787,8 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
   }, [resumeHits]);
 
   // Wheel and trackpad: handled before Konva sees the event, so it does not hit-test for it.
+  const zoomGlide = useRef<{ target: number | null; anchor: { x: number; y: number }; frame: number }>({ target: null, anchor: { x: 0, y: 0 }, frame: 0 });
+  useEffect(() => () => cancelAnimationFrame(zoomGlide.current.frame), []);
   const onWheel = useRef<(e: WheelEvent) => void>(() => {});
   onWheel.current = (e) => {
     e.preventDefault();
@@ -762,8 +797,31 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
     const rect = wrapRect.current;
     const p = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     if (e.ctrlKey || e.metaKey) {
-      const factor = Math.exp(-e.deltaY * 0.01); // trackpad pinch arrives as ctrl+wheel
-      setVp((v) => zoomAt(v, p, v.scale * factor));
+      // Trackpad pinch arrives as ctrl+wheel with small deltas and is applied as it comes; mouse wheel notches
+      // set a target that the view glides to over a few frames.
+      const { factor, notch } = wheelZoomFactor(e);
+      if (!notch) {
+        zoomGlide.current.target = null;
+        setVp((v) => zoomAt(v, p, v.scale * factor));
+        return;
+      }
+      const g = zoomGlide.current;
+      g.target = clampScale((g.target ?? vpRef.current.scale) * factor);
+      g.anchor = p;
+      if (!g.frame) {
+        const step = () => {
+          const target = g.target;
+          if (target == null) return void (g.frame = 0);
+          setVp((v) => {
+            const next = v.scale + (target - v.scale) * 0.3;
+            const done = Math.abs(next - target) / target < 0.002;
+            if (done) g.target = null;
+            return zoomAt(v, g.anchor, done ? target : next);
+          });
+          g.frame = requestAnimationFrame(step);
+        };
+        g.frame = requestAnimationFrame(step);
+      }
     } else {
       const dx = e.shiftKey ? e.deltaY : e.deltaX;
       const dy = e.shiftKey ? 0 : e.deltaY;
