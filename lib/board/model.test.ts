@@ -190,3 +190,60 @@ test("seeding 10,000 items is one transaction", () => {
   assert.equal(updates, 1);
   assert.equal(readAll(d).length, 10_000);
 });
+
+test("frames: reading order until someone reorders, then their order; moves are one undo step and sync", async () => {
+  const { addItem, frameOrder, moveFrame, itemsMap } = await import("./model");
+  type F = import("./model").FrameItem;
+  const d = new Y.Doc();
+  const undo = new Y.UndoManager(itemsMap(d));
+  const mk = (x: number, y: number, title: string) => {
+    undo.stopCapturing();
+    return addItem<F>(d, { type: "frame", x, y, w: 100, h: 100, title }, "u1");
+  };
+  mk(500, 0, "B");
+  mk(0, 0, "A");
+  mk(0, 400, "C");
+  const titles = (doc: Y.Doc) => frameOrder(readAll(doc).filter((i): i is F => i.type === "frame")).map((f) => f.title);
+  const byTitle = (s: string) => readAll(d).find((i) => i.type === "frame" && i.title === s)!;
+  assert.deepEqual(titles(d), ["A", "B", "C"]);
+
+  undo.stopCapturing();
+  moveFrame(d, byTitle("C").id, 0);
+  assert.deepEqual(titles(d), ["C", "A", "B"]);
+  // Every frame is numbered now: a further move changes only the moved frame.
+  const before = new Map(readAll(d).map((i) => [i.id, (i as F).order]));
+  undo.stopCapturing();
+  moveFrame(d, byTitle("B").id, 1);
+  assert.deepEqual(titles(d), ["C", "B", "A"]);
+  assert.deepEqual(readAll(d).filter((i) => (i as F).order !== before.get(i.id)).map((i) => i.id), [byTitle("B").id]);
+  // A new frame goes to the end; a move out of range clamps.
+  mk(-100, -100, "D");
+  assert.deepEqual(titles(d), ["C", "B", "A", "D"]);
+  undo.stopCapturing();
+  moveFrame(d, byTitle("C").id, 99);
+  assert.deepEqual(titles(d), ["B", "A", "D", "C"]);
+
+  // Another replica sees the same order.
+  const e = new Y.Doc();
+  Y.applyUpdate(e, Y.encodeStateAsUpdate(d));
+  assert.deepEqual(titles(e), ["B", "A", "D", "C"]);
+
+  undo.stopCapturing();
+  undo.undo();
+  assert.deepEqual(titles(d), ["C", "B", "A", "D"]);
+  undo.undo(); // creating D
+  undo.undo();
+  assert.deepEqual(titles(d), ["C", "A", "B"]);
+});
+
+test("frames: many moves into the same gap keep a strict order", async () => {
+  const { addItem, frameOrder, moveFrame } = await import("./model");
+  type F = import("./model").FrameItem;
+  const d = new Y.Doc();
+  for (let k = 0; k < 4; k++) addItem<F>(d, { type: "frame", x: k * 200, y: 0, w: 100, h: 100, title: String(k) }, "u1");
+  const list = () => frameOrder(readAll(d).filter((i): i is F => i.type === "frame"));
+  for (let n = 0; n < 80; n++) moveFrame(d, list()[3].id, 1);
+  const orders = list().map((f) => f.order!);
+  assert.equal(new Set(orders).size, orders.length);
+  assert.deepEqual([...orders].sort((a, b) => a - b), orders);
+});

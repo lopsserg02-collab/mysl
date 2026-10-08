@@ -6,14 +6,14 @@ import type Konva from "konva";
 import {
   ArrowLeft, Hand, MousePointer2, StickyNote, Type, Square, Circle, Triangle, Diamond, RectangleHorizontal, MoveUpRight, Pen, Highlighter, Eraser, Frame,
   Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Copy, Trash2, BringToFront, SendToBack, WifiOff, Lock, Unlock, CornerDownRight, ArrowRight, Share2, MessageCircle, ImagePlus, Download,
-  Bold, Italic, Underline, Slash, Spline, Lasso, Group as GroupIcon, Ungroup, PanelRight,
+  Bold, Italic, Underline, Slash, Spline, Lasso, Group as GroupIcon, Ungroup, PanelRight, Keyboard,
 } from "lucide-react";
 import { canComment, type BoardRole, type LinkAccess } from "@/lib/data/types";
 import { t } from "@/lib/copy";
 import { formatBytes } from "@/lib/plans";
 import {
   addItem, addSticky, boxOf, bringToFront, deleteItems, duplicateItems, fitImage, hasText, itemsInside, itemsMap, sendToBack, simplify, updateItems, bboxOfPoints,
-  groupItems, ungroupItems, withGroups, nextStyle, lassoHits,
+  groupItems, ungroupItems, withGroups, nextStyle, lassoHits, frameOrder, moveFrame,
   type Box, type ConnectorItem, type DrawingItem, type End, type FrameItem, type ImageItem, type Item, type Patch, type Route, type ShapeItem, type ShapeKind, type TextItem, type TextStyle,
 } from "@/lib/board/model";
 import { CLIP_MIME, copyPayload, parsePayload, pasteItems, plainText } from "@/lib/board/clipboard";
@@ -25,6 +25,7 @@ import { bounds, fitTo, intersects, stepZoom, toBoard, zoomAt, type Viewport } f
 import { ItemView, preloadImages, type Detail } from "./ItemView";
 import { FramesPanel } from "./FramesPanel";
 import { ExportDialog } from "./ExportDialog";
+import { ShortcutsDialog } from "./ShortcutsDialog";
 import { download, fileName, renderRegion, toPdfBlob, toPngBlob, type ExportFormat, type ExportScope } from "./exportBoard";
 import { ShareDialog } from "./ShareDialog";
 import { Comments, type CommentDraft } from "./Comments";
@@ -59,6 +60,7 @@ const rectFrom = (a: Pt, b: Pt): Box => ({ x: Math.min(a.x, b.x), y: Math.min(a.
 export function Board({ board, role, user, unread }: { board: { id: string; name: string; linkAccess: LinkAccess }; role: BoardRole; user: { id: string; name: string }; unread?: number }) {
   const [shareOpen, setShareOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [exporting, setExporting] = useState(false); // draws every item, not just what is on screen, and hides selection
   const [commentDraft, setCommentDraft] = useState<CommentDraft | null>(null);
   const mayComment = canComment(role);
@@ -354,13 +356,22 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
         if (box) setVp(fitTo(box, size));
         return;
       }
-      const tools: Record<string, Tool> = { v: "select", o: "lasso", h: "hand", n: "sticky", t: "text", s: "shape", l: "connector", p: "pen", e: "eraser" };
+      if (e.key === "?") {
+        e.preventDefault();
+        return setHelpOpen(true);
+      }
+      if (e.altKey) return; // Alt+letter belongs to the browser and the operating system
+      const tools: Record<string, Tool> = { v: "select", o: "lasso", h: "hand", n: "sticky", t: "text", s: "shape", l: "connector", p: "pen", m: "highlighter", e: "eraser" };
       if (tools[k]) {
         if (canEdit || tools[k] === "select" || tools[k] === "hand" || tools[k] === "lasso") setTool(tools[k]);
         return;
       }
       if (k === "c") {
         if (mayComment) setTool("comment");
+        return;
+      }
+      if (k === "i") {
+        if (canEdit) fileInput.current?.click();
         return;
       }
       switch (e.key) {
@@ -751,7 +762,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
     const stage = stageRef.current;
     if (!stage) throw new Error("no stage");
     const pick = scope === "selection" ? items.filter((i) => selected.includes(i.id)) : items;
-    const regions = scope === "frames" ? items.filter((i) => i.type === "frame").map(boxOf) : [bounds(pick.map(boxOfAny))].filter((b): b is Box => !!b);
+    const regions = scope === "frames" ? frameOrder(items.filter((i): i is FrameItem => i.type === "frame")).map(boxOf) : [bounds(pick.map(boxOfAny))].filter((b): b is Box => !!b);
     if (regions.length === 0) throw new Error("nothing to export");
     await preloadImages(items.filter((i): i is ImageItem => i.type === "image").map((i) => i.src));
     setExporting(true);
@@ -1057,7 +1068,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
             <ToolButton label={t.board.highlighter} active={tool === "highlighter"} onClick={() => setTool("highlighter")}><Highlighter size={20} /></ToolButton>
             <ToolButton label={t.board.eraser} active={tool === "eraser"} onClick={() => setTool("eraser")}><Eraser size={20} /></ToolButton>
             <ToolButton label={t.board.frame} active={tool === "frame"} onClick={() => setTool("frame")}><Frame size={20} /></ToolButton>
-            <ToolButton label={t.images.add} onClick={() => fileInput.current?.click()}><ImagePlus size={20} /></ToolButton>
+            <ToolButton label={t.images.tool} onClick={() => fileInput.current?.click()}><ImagePlus size={20} /></ToolButton>
             <div className="my-1 h-px shrink-0 bg-border" />
             <ToolButton label={t.board.undo} onClick={() => undo.undo()}><Undo2 size={20} /></ToolButton>
             <ToolButton label={t.board.redo} onClick={() => undo.redo()}><Redo2 size={20} /></ToolButton>
@@ -1184,6 +1195,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
         <ToolButton label={t.board.zoomIn} onClick={() => setVp((v) => stepZoom(v, 1, center))}><ZoomIn size={18} /></ToolButton>
         <ToolButton label={t.board.fit} onClick={fitAll}><Maximize size={18} /></ToolButton>
         <ToolButton label={t.frames.open} active={framesOpen} onClick={() => setFramesOpen((o) => !o)} buttonRef={framesOpener}><PanelRight size={18} /></ToolButton>
+        <ToolButton label={t.shortcuts.open} active={helpOpen} onClick={() => setHelpOpen(true)}><Keyboard size={18} /></ToolButton>
       </div>
       {framesOpen && (
         <FramesPanel
@@ -1198,12 +1210,19 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
           onRename={(id, title) => {
             if (byId.get(id)?.type === "frame" && editable(id) && (byId.get(id) as FrameItem).title !== title) updateItems(doc, [{ id, patch: { title } }]);
           }}
+          onMove={(id, to) => {
+            if (!canEdit) return;
+            undo.stopCapturing(); // each move is its own undo step
+            moveFrame(doc, id, to);
+            undo.stopCapturing();
+          }}
           onClose={() => {
             setFramesOpen(false);
             framesOpener.current?.focus();
           }}
         />
       )}
+      <ShortcutsDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   );
 }
