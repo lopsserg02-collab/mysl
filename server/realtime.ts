@@ -73,8 +73,8 @@ const server = new Server<RealtimeClaims>({
     const claims = verify<RealtimeClaims>(token);
     if (!claims || `board:${claims.boardId}` !== documentName) throw new Error("Not authorised");
     // Viewers and commenters get a read-only connection: the server drops their document updates.
-    // Guests (not signed in, viewing by link) are always read-only, whatever role a token says.
-    connectionConfig.readOnly = claims.guest === true || !["owner", "coowner", "editor"].includes(claims.role);
+    // Guests (not signed in, by link) edit only with an edit link; the web app signs their role from it.
+    connectionConfig.readOnly = claims.guest === true ? claims.role !== "editor" : !["owner", "coowner", "editor"].includes(claims.role);
     return claims;
   },
   // "comments" means someone changed a comment thread: tell everyone else on the board to fetch again.

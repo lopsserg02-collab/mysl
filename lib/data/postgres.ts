@@ -4,7 +4,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { cloneBoardState } from "../board/clone";
-import { AccessError, LINK_SECRET, TRASH_DAYS, canEditBoard, type AppNotification, type Board, type BoardListItem, type BoardRole, type DataLayer, type Asset, type Comment, type CommentThread, type Person, type User, type BillingWriter, type Subscription } from "./types";
+import { AccessError, LINK_SECRET, TRASH_DAYS, canEditBoard, type AppNotification, type Board, type BoardListItem, type BoardRole, type LinkAccess, type DataLayer, type Asset, type Comment, type CommentThread, type Person, type User, type BillingWriter, type Subscription } from "./types";
 
 type Sql = postgres.Sql;
 type Tx = postgres.TransactionSql;
@@ -271,8 +271,8 @@ export const postgresData: DataLayer = {
 
   async guestBoard(boardId, secret) {
     if (!UUID.test(boardId) || typeof secret !== "string" || !LINK_SECRET.test(secret)) return null;
-    const [row] = await asGuest((tx) => tx<{ id: string; name: string }[]>`select * from guest_board(${boardId}, ${secret})`);
-    return row ?? null;
+    const [row] = await asGuest((tx) => tx<{ id: string; name: string; link_access: LinkAccess }[]>`select * from guest_board(${boardId}, ${secret})`);
+    return row ? { id: row.id, name: row.name, linkAccess: row.link_access } : null;
   },
 
   async getGuestAsset(assetId, secret) {

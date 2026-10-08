@@ -81,8 +81,8 @@ test("guest link: not signed in, the board shows live and read-only, only with t
   await expect(guest).toHaveURL(/\/login\?next=/);
 
   // Now let guests view
-  await dialog.getByRole("checkbox", { name: "Смотреть могут и гости без входа" }).check();
-  await expect(dialog.getByText("Гости не видят участников")).toBeVisible();
+  await dialog.getByRole("checkbox", { name: "Открыть могут и гости без входа" }).check();
+  await expect(dialog.getByText("Гости не видят другие доски")).toBeVisible();
   await expect(async () => {
     expect((await tokenFor(guestCtx.request, boardId, k)).status).toBe(200);
   }).toPass();
@@ -177,5 +177,68 @@ test("guest link: not signed in, the board shows live and read-only, only with t
   checkGuest();
   await ownerCtx.close();
   await otherCtx.close();
+  await guestCtx.close();
+});
+
+test("edit link: a guest without an account edits this one board live, and nothing else", async ({ browser }) => {
+  const ownerCtx = await browser.newContext();
+  const owner = await ownerCtx.newPage();
+  const check = guard(owner);
+  await signIn(owner, `ge-${uniq()}@example.com`, "Олег");
+  await owner.getByRole("button", { name: "Новая доска" }).click();
+  await owner.waitForURL(/\/board\//);
+  await boardReady(owner);
+  const boardId = owner.url().split("/").pop()!;
+
+  await owner.getByRole("button", { name: "Поделиться" }).click();
+  const dialog = owner.getByRole("dialog", { name: "Поделиться доской" });
+  await dialog.getByRole("combobox", { name: "Доступ по ссылке" }).selectOption("edit");
+  await dialog.getByRole("checkbox", { name: "Открыть могут и гости без входа" }).check();
+  const link = await shareLink(dialog);
+  const k = new URL(link).searchParams.get("k")!;
+  await expect(async () => {
+    expect((await tokenFor(owner.request, boardId)).status).toBe(200);
+    const anonCtx = await browser.newContext();
+    const t = await tokenFor(anonCtx.request, boardId, k);
+    await anonCtx.close();
+    expect(t.body?.role).toBe("editor");
+  }).toPass();
+  await dialog.getByRole("button", { name: "Закрыть" }).click();
+
+  const guestCtx = await browser.newContext();
+  const guest = await guestCtx.newPage();
+  const checkGuest = guard(guest);
+  await guest.goto(link);
+  await boardReady(guest);
+  await expect(guest.getByRole("note")).toHaveText(/Вы редактируете как гость/);
+  // Only this board: no way back to a board list, no sharing, no comments, no pictures
+  await expect(owner.getByRole("link", { name: "Все доски" })).toBeVisible();
+  await expect(guest.getByRole("link", { name: "Все доски" })).toHaveCount(0);
+  await expect(guest.getByRole("button", { name: "Поделиться" })).toHaveCount(0);
+  await expect(guest.getByRole("button", { name: /Комментарий/ })).toHaveCount(0);
+  await expect(guest.getByRole("button", { name: "Картинка" })).toHaveCount(0);
+
+  // The guest adds a sticky; the owner sees it. The owner's sticky reaches the guest.
+  await guest.keyboard.press("n");
+  await guest.mouse.click(500, 450);
+  await guest.getByLabel("Текст стикера").fill("От гостя");
+  await guest.keyboard.press("Escape");
+  await expect(items(owner)).toHaveText(["Стикер: От гостя"]);
+  await owner.keyboard.press("n");
+  await owner.mouse.click(900, 450);
+  await owner.getByLabel("Текст стикера").fill("От хозяина");
+  await owner.keyboard.press("Escape");
+  await expect(items(guest)).toHaveCount(2);
+
+  // Back to a view link: a guest's fresh token is read-only again
+  await owner.getByRole("button", { name: "Поделиться" }).click();
+  await dialog.getByRole("combobox", { name: "Доступ по ссылке" }).selectOption("comment");
+  await expect(async () => {
+    expect((await tokenFor(guestCtx.request, boardId, k)).body?.role).toBe("viewer");
+  }).toPass();
+
+  check();
+  checkGuest();
+  await ownerCtx.close();
   await guestCtx.close();
 });

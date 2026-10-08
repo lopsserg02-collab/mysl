@@ -173,7 +173,8 @@ export interface DataLayer {
    * Someone who is not signed in, holding the link: the board's id and name when guest viewing is on and the
    * secret matches, otherwise null. Guests are read-only; there is nothing else they can call.
    */
-  guestBoard(boardId: string, secret: string): Promise<{ id: string; name: string } | null>;
+  /** linkAccess says what the guest may do: "edit" lets them change the board; anything else is viewing. */
+  guestBoard(boardId: string, secret: string): Promise<{ id: string; name: string; linkAccess: LinkAccess } | null>;
   /** An image for a guest: only on the board whose link secret they hold, and only while guest viewing is on. */
   getGuestAsset(assetId: string, secret: string): Promise<Asset | null>;
   // Comments (S09): anyone on the board reads them; commenters and up write. Mentions notify people on the board.
@@ -214,4 +215,9 @@ export class AccessError extends Error {
   constructor(message = "You do not have access to this board") {
     super(message);
   }
+}
+
+/** What a guest (not signed in) may do with a board's link: an edit link lets them edit; commenting needs an account. */
+export function guestRole(access: LinkAccess): "editor" | "viewer" {
+  return access === "edit" ? "editor" : "viewer";
 }

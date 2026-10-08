@@ -6,7 +6,7 @@ import type Konva from "konva";
 import {
   ArrowLeft, Hand, MousePointer2, StickyNote, Type, Square, Circle, Triangle, Diamond, RectangleHorizontal, MoveUpRight, Pen, Highlighter, Eraser, Frame,
   Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Copy, Trash2, BringToFront, SendToBack, WifiOff, Lock, Unlock, CornerDownRight, ArrowRight, Share2, MessageCircle, ImagePlus, Download,
-  Bold, Italic, Underline, Slash, Spline, Lasso, Group as GroupIcon, Ungroup, PanelRight, Eye, LogIn, Keyboard,
+  Bold, Italic, Underline, Slash, Spline, Lasso, Group as GroupIcon, Ungroup, PanelRight, Eye, Pencil, LogIn, Keyboard,
 } from "lucide-react";
 import { canComment, type BoardRole, type LinkAccess } from "@/lib/data/types";
 import { t } from "@/lib/copy";
@@ -84,7 +84,8 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
   const [commentDraft, setCommentDraft] = useState<CommentDraft | null>(null);
   // Guests only ever view; the server enforces it too (read-only realtime token, no session for actions).
   const mayComment = !guest && canComment(role);
-  const canEdit = !guest && (role === "owner" || role === "coowner" || role === "editor");
+  // Guests edit only with an edit link (their role says so); they never rename, comment or upload images.
+  const canEdit = role === "owner" || role === "coowner" || role === "editor";
   const canRename = !guest && (role === "owner" || role === "coowner");
   const { doc, provider, items, meta, status, peers, cursors, inks, undo, ready } = useBoardDoc(board.id, user, guest?.secret);
   // Background and grid everyone on the board sees; the default ink and frames follow the background.
@@ -218,6 +219,7 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
   const uploadImages = async (files: File[], at: Pt) => {
     const images = files.filter((f) => /^image\/(png|jpeg|gif|webp)$/.test(f.type));
     if (!canEdit) return;
+    if (guest) return files.length && setNotice(t.guest.noImages);
     if (images.length === 0) return files.length && setNotice(t.images.unsupported);
     setNotice(t.images.uploading);
     setNoticePlans(false);
@@ -989,7 +991,7 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
           { id: "highlighter", label: t.board.highlighter, icon: (s) => <Highlighter size={s} />, active: tool === "highlighter", onClick: pick("highlighter") },
           { id: "eraser", label: t.board.eraser, icon: (s) => <Eraser size={s} />, active: tool === "eraser", onClick: pick("eraser") },
           { id: "frame", label: t.board.frame, icon: (s) => <Frame size={s} />, active: tool === "frame", onClick: pick("frame") },
-          { id: "image", label: t.images.tool, icon: (s) => <ImagePlus size={s} />, onClick: () => fileInput.current?.click() },
+          ...(guest ? [] : [{ id: "image", label: t.images.tool, icon: (s: number) => <ImagePlus size={s} />, onClick: () => fileInput.current?.click() }]),
           { id: "undo", label: t.board.undo, icon: (s) => <Undo2 size={s} />, onClick: () => undo.undo(), divider: true, primary: true },
           { id: "redo", label: t.board.redo, icon: (s) => <Redo2 size={s} />, onClick: () => undo.redo() },
         ] satisfies ToolDef[])
@@ -1149,9 +1151,12 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
 
       <header className="absolute left-3 right-3 top-3 flex items-start justify-between gap-3">
         <div className="flex h-12 min-w-0 items-center gap-1 rounded-md bg-bg px-2 shadow-toolbar">
-          <Link href="/" aria-label={t.board.back} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-sm hover:bg-surface-hover">
-            <ArrowLeft size={18} aria-hidden />
-          </Link>
+          {/* A guest has this one board only: nowhere to go back to. */}
+          {!guest && (
+            <Link href="/" aria-label={t.board.back} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-sm hover:bg-surface-hover">
+              <ArrowLeft size={18} aria-hidden />
+            </Link>
+          )}
           <span className="mx-1 hidden text-sm font-semibold sm:inline">{t.product}</span>
           <label className="sr-only" htmlFor="board-name">Название доски</label>
           <input
@@ -1221,8 +1226,8 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
       </header>
       {guest && (
         <div role="note" className="absolute left-1/2 top-[72px] flex max-w-[calc(100%-32px)] -translate-x-1/2 items-center gap-3 rounded-md bg-bg px-3 py-2 text-sm shadow-pop">
-          <Eye size={16} aria-hidden className="shrink-0 text-text-muted" />
-          <span>{t.guest.banner}</span>
+          {canEdit ? <Pencil size={16} aria-hidden className="shrink-0 text-text-muted" /> : <Eye size={16} aria-hidden className="shrink-0 text-text-muted" />}
+          <span>{canEdit ? t.guest.bannerEdit : t.guest.banner}</span>
           <Link href={guest.signIn} className="shrink-0 font-semibold text-accent underline underline-offset-2">{t.guest.signIn}</Link>
         </div>
       )}
