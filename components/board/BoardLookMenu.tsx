@@ -5,7 +5,21 @@ import { t } from "@/lib/copy";
 import { BOARD_BG_NAMES, GRID_STYLES, boardLook, type GridStyle } from "@/lib/board/palette";
 
 /** «Фон доски»: background colour and grid style for everyone on the board. Editors change it; others see it. */
-export function BoardLookMenu({ bg, grid, canEdit, onChange }: { bg: string; grid: GridStyle; canEdit: boolean; onChange: (patch: { bg?: string; grid?: GridStyle }) => void }) {
+export function BoardLookMenu({
+  bg,
+  grid,
+  canEdit,
+  onChange,
+  liveInk,
+  onLiveInk,
+}: {
+  bg: string;
+  grid: GridStyle;
+  canEdit: boolean;
+  onChange: (patch: { bg?: string; grid?: GridStyle }) => void;
+  liveInk: boolean;
+  onLiveInk: (on: boolean) => void;
+}) {
   const [open, setOpen] = useState(false);
   const button = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
@@ -94,6 +108,13 @@ export function BoardLookMenu({ bg, grid, canEdit, onChange }: { bg: string; gri
               ))}
             </div>
           </fieldset>
+          <label className="flex cursor-pointer items-start gap-2 border-t border-border pt-3 text-sm">
+            <input type="checkbox" checked={liveInk} onChange={(e) => onLiveInk(e.target.checked)} className="mt-0.5 h-4 w-4 accent-[var(--color-accent)]" />
+            <span>
+              {t.boardLook.liveInk}
+              <span className="block text-xs text-text-muted">{t.boardLook.liveInkHint}</span>
+            </span>
+          </label>
         </div>
       )}
     </div>

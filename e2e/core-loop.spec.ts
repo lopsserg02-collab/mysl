@@ -32,8 +32,8 @@ test("F01+F03: create a board, add a sticky, it syncs live to a second tab and s
   await editor.fill("Первая мысль");
   await a.keyboard.press("Escape");
 
-  // B sees the sticky text rendered on canvas: verify through the shared document size by checking the empty hint disappears
-  await expect(b.getByText("Нажмите N и кликните по доске")).toHaveCount(0);
+  // B sees the sticky: the shared document now holds one item
+  await expect(b.locator("[data-items]")).toHaveAttribute("data-items", "1");
   // And B can open the sticky for editing and sees the same text
   await b.getByRole("button", { name: "Показать всё (Shift+1)" }).click();
   await b.mouse.dblclick(720, 450);
@@ -49,10 +49,10 @@ test("F01+F03: create a board, add a sticky, it syncs live to a second tab and s
   await a.mouse.click(1300, 800); // deselect, focus canvas
   await a.keyboard.press("Control+z");
   await a.keyboard.press("Control+z");
-  await expect(b.getByText("Нажмите N и кликните по доске")).toBeVisible();
+  await expect(b.locator("[data-items]")).toHaveAttribute("data-items", "0");
   await a.keyboard.press("Control+Shift+z");
   await a.keyboard.press("Control+Shift+z");
-  await expect(b.getByText("Нажмите N и кликните по доске")).toHaveCount(0);
+  await expect(b.locator("[data-items]")).toHaveAttribute("data-items", "1");
 
   // Reload keeps it (persisted on the server)
   await b.reload();

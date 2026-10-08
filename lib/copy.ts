@@ -309,6 +309,8 @@ export const t = {
     open: "Фон доски",
     colour: "Цвет фона",
     grid: "Сетка",
+    liveInk: "Рисование вживую",
+    liveInkHint: "Другие видят линию, пока вы её рисуете, а вы видите их линии. Настройка только для вас.",
     names: {
       default: "Как в теме",
       paper: "Белый",
@@ -450,7 +452,6 @@ export const t = {
     readOnly: "Только просмотр",
     titleFallback: "Доска",
     stickyPlaceholder: "Напишите мысль",
-    emptyHint: "Нажмите N и кликните по доске, чтобы добавить стикер",
     you: "вы",
     morePeople: (n: number) => `Ещё ${n} на доске`,
   },
