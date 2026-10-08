@@ -34,8 +34,22 @@ export interface CursorStore {
   subscribe(listener: () => void): () => void;
 }
 
-function cursorStore() {
-  let value: PeerCursor[] = [];
+/** A stroke another person is drawing right now, before they release the button (board coordinates). */
+export interface PeerInk {
+  clientId: number;
+  points: number[];
+  stroke: string;
+  width: number;
+  highlighter: boolean;
+}
+
+export interface InkStore {
+  get(): PeerInk[];
+  subscribe(listener: () => void): () => void;
+}
+
+function cursorStore<T = PeerCursor>() {
+  let value: T[] = [];
   const listeners = new Set<() => void>();
   return {
     get: () => value,
@@ -43,7 +57,7 @@ function cursorStore() {
       listeners.add(listener);
       return () => void listeners.delete(listener);
     },
-    set(next: PeerCursor[]) {
+    set(next: T[]) {
       value = next;
       listeners.forEach((l) => l());
     },
@@ -99,6 +113,7 @@ export function useBoardDoc(boardId: string, user: { id: string; name: string },
   const [status, setStatus] = useState<ConnStatus>("connecting");
   const [peers, setPeers] = useState<Peer[]>([]);
   const cursors = useMemo(() => cursorStore(), [boardId]);
+  const inks = useMemo(() => cursorStore<PeerInk>(), [boardId]);
   // True once the board content is loaded, from this browser's copy or from the server.
   const [ready, setReady] = useState(false);
   const [meta, setMetaState] = useState<BoardMeta>({});
@@ -159,13 +174,16 @@ export function useBoardDoc(boardId: string, user: { id: string; name: string },
     // per frame. People (avatars, selections) go to React state only when they change; cursors go to the store.
     let lastPeers = "[]";
     let lastCursors = "";
+    let lastInks: unknown[] = [];
     const readAwareness = perFrame(() => {
       const out: Peer[] = [];
       const pointers: PeerCursor[] = [];
+      const strokes: PeerInk[] = [];
       p.awareness?.getStates().forEach((s, clientId) => {
         if (clientId === doc.clientID || !s.user) return;
         out.push({ clientId, userId: s.user.userId, name: s.user.name, color: s.user.color, selection: s.selection ?? [] });
         if (s.cursor) pointers.push({ clientId, name: s.user.name, color: s.user.color, x: s.cursor.x, y: s.cursor.y });
+        if (s.ink && Array.isArray(s.ink.points)) strokes.push({ clientId, ...s.ink });
       });
       const key = JSON.stringify(out);
       if (key !== lastPeers) {
@@ -176,6 +194,12 @@ export function useBoardDoc(boardId: string, user: { id: string; name: string },
       if (ckey !== lastCursors) {
         lastCursors = ckey;
         cursors.set(pointers);
+      }
+      // A stroke's state object is replaced on every change, so comparing references is enough.
+      const raw = strokes.map((k) => p.awareness?.getStates().get(k.clientId)?.ink);
+      if (raw.length !== lastInks.length || raw.some((r, k) => r !== lastInks[k])) {
+        lastInks = raw;
+        inks.set(strokes);
       }
     });
     const onAwareness = ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
@@ -254,7 +278,7 @@ export function useBoardDoc(boardId: string, user: { id: string; name: string },
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOffline);
     };
-  }, [boardId, doc, user.id, user.name, guestSecret, cursors]);
+  }, [boardId, doc, user.id, user.name, guestSecret, cursors, inks]);
 
-  return { doc, provider, items, meta, status, peers, cursors: cursors as CursorStore, undo, ready };
+  return { doc, provider, items, meta, status, peers, cursors: cursors as CursorStore, inks: inks as InkStore, undo, ready };
 }

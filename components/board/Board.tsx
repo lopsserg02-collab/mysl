@@ -23,6 +23,7 @@ import { INITIAL_SIZES, clampSize, parseSizes, stepSize, strokeHits, type BrushT
 import { seedGrid } from "@/lib/board/bench";
 import { renameBoard } from "@/app/actions";
 import { useBoardDoc } from "./useBoardDoc";
+import { PeerInks } from "./PeerInks";
 import { bounds, clampScale, fitTo, intersects, stepZoom, toBoard, wheelZoomFactor, zoomAt, type Viewport } from "./viewport";
 import { ItemView, preloadImages, setGuestAssetSecret, type Detail } from "./ItemView";
 import { BulkItems } from "./BulkItems";
@@ -85,7 +86,7 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
   const mayComment = !guest && canComment(role);
   const canEdit = !guest && (role === "owner" || role === "coowner" || role === "editor");
   const canRename = !guest && (role === "owner" || role === "coowner");
-  const { doc, provider, items, meta, status, peers, cursors, undo, ready } = useBoardDoc(board.id, user, guest?.secret);
+  const { doc, provider, items, meta, status, peers, cursors, inks, undo, ready } = useBoardDoc(board.id, user, guest?.secret);
   // Background and grid everyone on the board sees; the default ink and frames follow the background.
   const look = useMemo(() => boardLook(meta.bg), [meta.bg]);
   const gridStyle: GridStyle = meta.grid === "lines" || meta.grid === "none" ? meta.grid : "dots";
@@ -147,6 +148,19 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
   // Konva reports a double click for any two quick clicks; only count ones in the same spot.
   const lastDown = useRef({ x: 0, y: 0, prev: { x: -999, y: -999 } });
   const cursorFrame = useRef(0);
+  const inkFrame = useRef(0);
+  // «Рисование вживую»: show a stroke to others while it is being drawn, and theirs to me. Per person, on by default.
+  const [liveInk, setLiveInk] = useLocalPref("mysl.liveInk", true, (raw) => raw !== "false");
+  /** Shares the stroke in progress (null when it ends), at most once a frame. */
+  const shareInk = (points: number[] | null) => {
+    cancelAnimationFrame(inkFrame.current);
+    if (!points) return provider?.awareness?.setLocalStateField("ink", null);
+    if (!liveInk) return;
+    const highlighter = tool === "highlighter";
+    inkFrame.current = requestAnimationFrame(() =>
+      provider?.awareness?.setLocalStateField("ink", { points: points.map((v) => Math.round(v * 10) / 10), stroke: ink, width: sizes[highlighter ? "highlighter" : "pen"], highlighter }),
+    );
+  };
 
   const byId = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
@@ -657,7 +671,9 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
       case "draw": {
         const last = drag.points.length;
         if (Math.hypot(b.x - drag.points[last - 2], b.y - drag.points[last - 1]) * vp.scale < 2) return;
-        return setDrag({ ...drag, points: [...drag.points, b.x, b.y] });
+        const points = [...drag.points, b.x, b.y];
+        shareInk(points);
+        return setDrag({ ...drag, points });
       }
       case "erase":
         return eraseAt(p);
@@ -667,6 +683,7 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
   const onPointerUp = () => {
     const d = drag;
     setDrag(null);
+    if (d?.kind === "draw") shareInk(null);
     if (d?.kind === "move" && d.moved) undo.stopCapturing();
     if (d?.kind === "lasso" && selected.length > 0) setTool("select");
     if (d?.kind === "create") {
@@ -1062,6 +1079,7 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
                 const pad = 8 / vp.scale;
                 return <Rect key={`group-${g}`} x={b.x - pad} y={b.y - pad} width={b.w + pad * 2} height={b.h + pad * 2} stroke={look.selection} strokeWidth={1.5 / vp.scale} listening={false} />;
               })}
+              {liveInk && !exporting && <PeerInks store={inks} look={look} />}
               <DragPreview drag={drag} scale={vp.scale} shapeKind={shapeKind} ink={inkOn(look, ink)} highlighter={tool === "highlighter"} width={sizes[tool === "highlighter" ? "highlighter" : "pen"]} look={look} lookup={lookup} />
               <Transformer
                 ref={trRef}
@@ -1184,7 +1202,7 @@ export function Board({ board, role, user, unread, guest }: { board: { id: strin
           >
             <Download size={18} aria-hidden />
           </button>
-          <BoardLookMenu bg={meta.bg ?? "default"} grid={gridStyle} canEdit={canEdit} onChange={changeLook} />
+          <BoardLookMenu bg={meta.bg ?? "default"} grid={gridStyle} canEdit={canEdit} onChange={changeLook} liveInk={liveInk} onLiveInk={setLiveInk} />
           {guest ? (
             <Link href={guest.signIn} className="ml-1 flex h-9 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-on-accent hover:bg-accent-hover">
               <LogIn size={16} aria-hidden /> {t.guest.signIn}
