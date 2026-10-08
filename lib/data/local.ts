@@ -459,7 +459,7 @@ export const localData: DataLayer = {
     tx((db) => {
       const b = db.boards.find((x) => x.id === boardId && !x.deletedAt);
       if (!b || !b.guestView || b.linkAccess === "private" || !secretMatches(db, boardId, secret)) return null;
-      return { id: b.id, name: b.name };
+      return { id: b.id, name: b.name, linkAccess: b.linkAccess };
     }, false),
 
   getGuestAsset: (assetId, secret) =>

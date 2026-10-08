@@ -144,7 +144,7 @@ for (const [name, load] of layers) {
     await assert.rejects(data.setGuestView(viewer.id, board.id, false), "only owners and co-owners switch guests");
 
     await data.setLinkAccess(owner.id, board.id, "view");
-    assert.deepEqual(await data.guestBoard(board.id, secret), { id: board.id, name: "Публичная" });
+    assert.deepEqual(await data.guestBoard(board.id, secret), { id: board.id, name: "Публичная", linkAccess: "view" });
     assert.equal((await data.getBoard(board.id))?.guestView, true);
 
     // Without the secret, with a wrong one, or with another board's: nothing.
@@ -170,7 +170,7 @@ for (const [name, load] of layers) {
     await data.setLinkAccess(owner.id, board.id, "private");
     assert.equal(await data.guestBoard(board.id, fresh), null);
     await data.setLinkAccess(owner.id, board.id, "edit");
-    assert.ok(await data.guestBoard(board.id, fresh));
+    assert.equal((await data.guestBoard(board.id, fresh))?.linkAccess, "edit", "an edit link lets guests edit");
     await data.trashBoard(owner.id, board.id);
     assert.equal(await data.guestBoard(board.id, fresh), null);
     assert.equal(await data.getGuestAsset(img.id, fresh), null);
@@ -219,8 +219,8 @@ if (process.env.TEST_DATABASE_URL) {
     // The old forms that took the board id alone are gone.
     await assert.rejects(raw()`select join_board_via_link(${board.id}::uuid)`);
     await assert.rejects(raw()`select join_board_via_link(${board.id}::uuid, null::text)`);
-    // What a guest may call: the board's id and name for the right secret, nothing for any other.
-    assert.deepEqual([...(await asAnon((tx) => tx`select * from guest_board(${board.id}, ${secret})`))], [{ id: board.id, name: "Открытая" }]);
+    // What a guest may call: the board's id, name and link access for the right secret, nothing for any other.
+    assert.deepEqual([...(await asAnon((tx) => tx`select * from guest_board(${board.id}, ${secret})`))], [{ id: board.id, name: "Открытая", link_access: "comment" }]);
     assert.equal((await asAnon((tx) => tx`select * from guest_board(${board.id}, ${"0".repeat(32)})`)).length, 0);
     assert.equal((await asAnon((tx) => tx`select * from guest_board(${board.id}, null)`)).length, 0);
     assert.equal((await data.getBoard(board.id))?.name, "Открытая");

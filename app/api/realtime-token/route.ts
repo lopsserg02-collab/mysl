@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { data, LINK_SECRET } from "@/lib/data";
+import { data, guestRole, LINK_SECRET } from "@/lib/data";
 import { currentUser } from "@/lib/session";
 import { sign, type RealtimeClaims } from "@/lib/token";
 import { t } from "@/lib/copy";
@@ -20,10 +20,12 @@ export async function POST(req: Request) {
     const claims: RealtimeClaims = { userId: user.id, name: user.name, boardId, role };
     return NextResponse.json({ token: sign(claims, 60 * 60), role });
   }
-  // A guest holding the board's link: read-only, a fresh anonymous id, and a short life, so that turning
-  // guest viewing off or making a new link locks them out at their next reconnect.
+  // A guest holding the board's link: an edit link lets them edit, any other link only view. A fresh
+  // anonymous id and a short life, so that turning guests off or making a new link locks them out at
+  // their next reconnect.
   const guest = k ? await data.guestBoard(boardId, k) : null;
   if (!guest) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
-  const claims: RealtimeClaims = { userId: `guest:${randomUUID()}`, name: t.guest.name, boardId: guest.id, role: "viewer", guest: true };
-  return NextResponse.json({ token: sign(claims, 10 * 60), role: "viewer" });
+  const role = guestRole(guest.linkAccess);
+  const claims: RealtimeClaims = { userId: `guest:${randomUUID()}`, name: t.guest.name, boardId: guest.id, role, guest: true };
+  return NextResponse.json({ token: sign(claims, 10 * 60), role });
 }

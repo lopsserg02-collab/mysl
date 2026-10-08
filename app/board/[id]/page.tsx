@@ -1,6 +1,7 @@
 import Link from "next/link";
+import { randomUUID } from "node:crypto";
 import { redirect } from "next/navigation";
-import { data, LINK_SECRET } from "@/lib/data";
+import { data, guestRole, LINK_SECRET } from "@/lib/data";
 import { currentUser } from "@/lib/session";
 import { BoardClient } from "@/components/board/BoardClient";
 import { checkEditorSeat } from "@/lib/billing/limits";
@@ -38,11 +39,19 @@ export default async function BoardPage({ params, searchParams }: Props) {
   const valid = UUID.test(id);
 
   if (!user) {
-    // Not signed in: a valid guest link shows the board read-only; anything else asks to sign in,
-    // without saying whether the board exists.
+    // Not signed in: a valid guest link shows this one board (editable with an edit link); anything else
+    // asks to sign in, without saying whether the board exists. Each guest gets their own id, so two
+    // guests show as two people with their own colours.
     const guest = valid && k ? await data.guestBoard(id, k) : null;
     if (!guest) redirect(`/login?next=${encodeURIComponent(here)}`);
-    return <BoardClient board={{ id: guest.id, name: guest.name, linkAccess: "view", guestView: true }} role="viewer" user={{ id: "guest", name: t.guest.name }} guest={{ secret: k!, signIn: `/login?next=${encodeURIComponent(here)}` }} />;
+    return (
+      <BoardClient
+        board={{ id: guest.id, name: guest.name, linkAccess: guest.linkAccess, guestView: true }}
+        role={guestRole(guest.linkAccess)}
+        user={{ id: `guest:${randomUUID()}`, name: t.guest.name }}
+        guest={{ secret: k!, signIn: `/login?next=${encodeURIComponent(here)}` }}
+      />
+    );
   }
 
   const [board, member] = valid ? await Promise.all([data.getBoard(id), data.getRole(id, user.id)]) : [null, null];
