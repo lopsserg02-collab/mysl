@@ -40,12 +40,15 @@ test("a pen stroke that leaves the board ends where the button is released", asy
   const check = guard(page);
   await start(page);
   await page.keyboard.press("p");
-  // Start on the board, run over the left toolbar and off the page edge, release there.
-  await page.mouse.move(500, 400);
+  // Start on the board, run onto the left toolbar and release there: the stroke is finished at once.
+  const bar = await page.getByRole("navigation", { name: "Инструменты" }).boundingBox();
+  const overBar = { x: bar!.x + bar!.width / 2, y: bar!.y + bar!.height / 2 };
+  await page.mouse.move(500, overBar.y);
   await page.mouse.down();
-  for (let x = 480; x >= 0; x -= 40) await page.mouse.move(x, 400);
+  for (let x = 460; x > overBar.x; x -= 40) await page.mouse.move(x, overBar.y);
+  await page.mouse.move(overBar.x, overBar.y);
   await page.mouse.up();
-  await expect(list(page)).toHaveCount(1);
+  await expect(list(page)).toHaveCount(1, { timeout: 2000 });
 
   // Moving back over the board with the button up must not keep drawing.
   for (let x = 40; x <= 700; x += 60) await page.mouse.move(x, 500);
