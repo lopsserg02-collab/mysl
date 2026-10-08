@@ -212,8 +212,8 @@ test("edit link: a guest without an account edits this one board live, and nothi
   await boardReady(guest);
   await expect(guest.getByRole("note")).toHaveText(/Вы редактируете как гость/);
   // Only this board: no way back to a board list, no sharing, no comments, no pictures
-  await expect(owner.getByRole("link", { name: "К доскам" })).toBeVisible();
-  await expect(guest.getByRole("link", { name: "К доскам" })).toHaveCount(0);
+  await expect(owner.getByRole("link", { name: "Все доски" })).toBeVisible();
+  await expect(guest.getByRole("link", { name: "Все доски" })).toHaveCount(0);
   await expect(guest.getByRole("button", { name: "Поделиться" })).toHaveCount(0);
   await expect(guest.getByRole("button", { name: /Комментарий/ })).toHaveCount(0);
   await expect(guest.getByRole("button", { name: "Картинка" })).toHaveCount(0);
