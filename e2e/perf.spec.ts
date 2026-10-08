@@ -23,7 +23,37 @@ type Mode = "pan" | "zoom" | "edit" | "idle";
 type Stats = { frames: number; meanMs: number; p50Ms: number; p95Ms: number; maxMs: number; fps: number };
 type Hook = { seed: (n: number) => number; touch: () => void };
 
-async function measure(page: Page, mode: Mode): Promise<Stats> {
+/** PERF_PROFILE=1: a CPU profile of each measurement, summed by function (self time), printed to the console. */
+async function profiled<T>(page: Page, label: string, run: () => Promise<T>): Promise<T> {
+  if (!process.env.PERF_PROFILE) return run();
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Profiler.enable");
+  await cdp.send("Profiler.setSamplingInterval", { interval: 200 });
+  await cdp.send("Profiler.start");
+  const out = await run();
+  const { profile } = (await cdp.send("Profiler.stop")) as { profile: { nodes: { id: number; callFrame: { functionName: string; url: string; lineNumber: number } }[]; samples: number[]; timeDeltas: number[] } };
+  const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+  const self = new Map<string, number>();
+  let total = 0;
+  profile.samples.forEach((id, k) => {
+    const n = byId.get(id)!;
+    const f = n.callFrame;
+    const key = `${f.functionName || "(anon)"} ${f.url.split("/").pop()}:${f.lineNumber}`;
+    const dt = profile.timeDeltas[k] / 1000;
+    total += dt;
+    self.set(key, (self.get(key) ?? 0) + dt);
+  });
+  const top = [...self].sort((a, b) => b[1] - a[1]).slice(0, 25);
+  console.log(`PROFILE ${label} total ${Math.round(total)} ms\n` + top.map(([k, v]) => `  ${v.toFixed(0).padStart(6)} ms  ${k}`).join("\n"));
+  await cdp.detach();
+  return out;
+}
+
+async function measure(page: Page, mode: Mode, label: string = mode): Promise<Stats> {
+  return profiled(page, label, () => measureRaw(page, mode));
+}
+
+async function measureRaw(page: Page, mode: Mode): Promise<Stats> {
   const times = await page.evaluate(
     ({ frames, mode }) =>
       new Promise<number[]>((resolve) => {
@@ -136,20 +166,21 @@ test(`perf: ${N} items, pan and zoom frame times`, async ({ page }) => {
   // Whole board in view: every item is on screen, drawn in low detail.
   await page.keyboard.press("Shift+1");
   await page.waitForTimeout(500);
-  results.panFit = await measure(page, "pan");
-  results.zoomFit = await measure(page, "zoom");
+  results.panFit = await measure(page, "pan", "panFit");
+  results.zoomFit = await measure(page, "zoom", "zoomFit");
+  results.editFit = await measure(page, "edit", "editFit");
   // 100%: the usual working zoom, a couple of dozen items on screen.
   await page.keyboard.press("Shift+1");
   await zoomTo(page, "100%", 0);
-  results.pan100 = await measure(page, "pan");
-  results.zoom100 = await measure(page, "zoom");
-  results.edit100 = await measure(page, "edit");
+  results.pan100 = await measure(page, "pan", "pan100");
+  results.zoom100 = await measure(page, "zoom", "zoom100");
+  results.edit100 = await measure(page, "edit", "edit100");
   // 50%: about a hundred items in full detail.
   await zoomTo(page, "50%", 2);
-  results.pan50 = await measure(page, "pan");
+  results.pan50 = await measure(page, "pan", "pan50");
   // 25%: a few hundred items, low detail.
   await zoomTo(page, "25%", 3);
-  results.pan25 = await measure(page, "pan");
+  results.pan25 = await measure(page, "pan", "pan25");
 
   // Other people on the board, through the realtime server.
   const boardId = /\/board\/([0-9a-f-]{36})/.exec(page.url())![1];
@@ -165,7 +196,7 @@ test(`perf: ${N} items, pan and zoom frame times`, async ({ page }) => {
     results.remoteEdit100 = await (async () => {
       others.edits();
       await page.waitForTimeout(500);
-      const s = await measure(page, "idle");
+      const s = await measure(page, "idle", "remoteEdit100");
       others.stop();
       return s;
     })();
@@ -173,10 +204,10 @@ test(`perf: ${N} items, pan and zoom frame times`, async ({ page }) => {
     await expect(page.getByRole("img", { name: "Гость 50" })).toHaveCount(CURSORS >= 50 ? 1 : 0);
     await page.waitForTimeout(500);
     results.cursors = CURSORS;
-    results.cursorsIdle100 = await measure(page, "idle");
-    results.cursorsPan100 = await measure(page, "pan");
+    results.cursorsIdle100 = await measure(page, "idle", "cursorsIdle100");
+    results.cursorsPan100 = await measure(page, "pan", "cursorsPan100");
     others.edits();
-    results.cursorsRemoteEdit100 = await measure(page, "idle");
+    results.cursorsRemoteEdit100 = await measure(page, "idle", "cursorsRemoteEdit100");
   } finally {
     others.destroy();
   }

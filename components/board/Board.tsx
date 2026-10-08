@@ -16,6 +16,7 @@ import {
   groupItems, ungroupItems, withGroups, nextStyle, lassoHits, frameOrder, moveFrame,
   type Box, type ConnectorItem, type DrawingItem, type End, type FrameItem, type ImageItem, type Item, type Patch, type Route, type ShapeItem, type ShapeKind, type TextItem, type TextStyle,
 } from "@/lib/board/model";
+import { hitTest } from "@/lib/board/hit";
 import { CLIP_MIME, copyPayload, parsePayload, pasteItems, plainText } from "@/lib/board/clipboard";
 import { CANVAS, DEFAULT_INK, INK, STICKY_COLOR_NAMES, ZOOM, boardLook, inkOn, stickyPair, type BoardLook, type GridStyle } from "@/lib/board/palette";
 import { INITIAL_SIZES, clampSize, parseSizes, stepSize, strokeHits, type BrushTool } from "@/lib/board/brush";
@@ -24,9 +25,11 @@ import { renameBoard } from "@/app/actions";
 import { useBoardDoc } from "./useBoardDoc";
 import { bounds, fitTo, intersects, stepZoom, toBoard, zoomAt, type Viewport } from "./viewport";
 import { ItemView, preloadImages, type Detail } from "./ItemView";
+import { BulkItems } from "./BulkItems";
 import { FramesPanel } from "./FramesPanel";
 import { ExportDialog } from "./ExportDialog";
 import { ShortcutsDialog } from "./ShortcutsDialog";
+import { Cursors } from "./Cursors";
 import { Toolbar, settingsPlace, useLocalPref, useToolbarPrefs, type ToolDef } from "./Toolbar";
 import { BoardLookMenu, gridBackground } from "./BoardLookMenu";
 import { BrushSize } from "./BrushSize";
@@ -70,7 +73,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   const mayComment = canComment(role);
   const canEdit = role === "owner" || role === "coowner" || role === "editor";
   const canRename = role === "owner" || role === "coowner";
-  const { doc, provider, items, meta, status, peers, undo, ready } = useBoardDoc(board.id, user);
+  const { doc, provider, items, meta, status, peers, cursors, undo, ready } = useBoardDoc(board.id, user);
   // Background and grid everyone on the board sees; the default ink and frames follow the background.
   const look = useMemo(() => boardLook(meta.bg), [meta.bg]);
   const gridStyle: GridStyle = meta.grid === "lines" || meta.grid === "none" ? meta.grid : "dots";
@@ -104,6 +107,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   }, [doc, user.id, canEdit]);
 
   const wrapRef = useRef<HTMLDivElement>(null);
+  const wrapRect = useRef({ left: 0, top: 0 });
   const stageRef = useRef<Konva.Stage>(null);
   const trRef = useRef<Konva.Transformer>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -130,6 +134,8 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   const cursorFrame = useRef(0);
 
   const byId = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const frames = useMemo(() => items.filter((i): i is FrameItem => i.type === "frame"), [items]);
   const lookup = useCallback((id: string) => {
     const i = byId.get(id);
     return i ? boxOf(i) : undefined;
@@ -147,9 +153,23 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setSize({ w: el.clientWidth, h: el.clientHeight }));
+    // Where the board sits in the window, read on resize instead of on every pointer and wheel event
+    // (reading it then forces the browser to lay the page out mid-frame).
+    const place = () => {
+      wrapRect.current = el.getBoundingClientRect();
+    };
+    const ro = new ResizeObserver(() => {
+      place();
+      setSize({ w: el.clientWidth, h: el.clientHeight });
+    });
     ro.observe(el);
-    return () => ro.disconnect();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
   }, []);
 
   useEffect(() => {
@@ -447,9 +467,19 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
     }
     return null;
   };
+  /**
+   * The item at screen point `p`: from the canvas node that was hit, or, far out where items are drawn in bulk
+   * without nodes of their own, by geometry. `title` is set when a frame was hit on its title.
+   */
+  const pickAt = (target: Konva.Node | null, p: Pt): { id: string | null; title: boolean } => {
+    const id = itemAt(target);
+    if (id) return { id, title: !!target?.getAttr("frameTitle") };
+    if (detail !== "low") return { id: null, title: false };
+    return hitTest(visible, toBoard(vp, p), vp.scale, lookup);
+  };
   /** The item under the pointer that a connector may attach to. */
   const attachableAt = (p: Pt): string | null => {
-    const id = itemAt(stageRef.current?.getIntersection(p) ?? null);
+    const id = pickAt(stageRef.current?.getIntersection(p) ?? null, p).id;
     const i = id ? byId.get(id) : undefined;
     return i && i.type !== "connector" && i.type !== "drawing" ? id : null;
   };
@@ -512,7 +542,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
     }
     if (tool === "comment") {
       // A pin on an item sticks to it; elsewhere it stays where it was dropped.
-      const id = itemAt(e.target);
+      const id = pickAt(e.target, p).id;
       const on = id ? byId.get(id) : undefined;
       pendingComment.current = on && on.type !== "connector" ? { x: b.x - on.x, y: b.y - on.y, itemId: on.id } : { x: b.x, y: b.y, itemId: null };
       setTool("select");
@@ -541,11 +571,12 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
           return setDrag({ kind: "erase" });
       }
     }
-    const id = itemAt(e.target);
+    const picked = pickAt(e.target, p);
+    const id = picked.id;
     if (id) {
       // A frame is picked by its title; its empty inside works like empty canvas.
       const hit = byId.get(id);
-      if (hit?.type === "frame" && !(e.target as Konva.Node).getAttr("frameTitle") && !selected.includes(id)) {
+      if (hit?.type === "frame" && !picked.title && !selected.includes(id)) {
         startMarquee(b, e.evt.shiftKey);
         return;
       }
@@ -562,7 +593,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   };
 
   const shareCursor = (e: React.PointerEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
+    const rect = wrapRect.current;
     pointerIn.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     const b = toBoard(vp, { x: e.clientX - rect.left, y: e.clientY - rect.top });
     cancelAnimationFrame(cursorFrame.current);
@@ -674,6 +705,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   // has been still for a moment, or right away when a pointer goes down.
   // With thousands of items on screen, the items are also drawn once into a bitmap that moves with the view
   // until it settles, instead of drawing every item on every frame.
+  const [frozen, setFrozen] = useState(false);
   const layerRef = useRef<Konva.Layer>(null);
   const itemsRef = useRef<Konva.Group>(null);
   const motion = useRef({ count: 0, scale: 1 }); // what is on screen, for the bitmap decision
@@ -684,6 +716,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
     if (group?.isCached()) {
       group.clearCache();
       group.getLayer()?.batchDraw();
+      setFrozen(false);
     }
     const layer = layerRef.current;
     if (layer && !layer.listening()) {
@@ -698,7 +731,10 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
     if (group && !group.isCached() && count > BITMAP_ABOVE) {
       const r = group.getClientRect({ relativeTo: group });
       const ratio = scale * (window.devicePixelRatio || 1);
-      if (r.width * ratio < 4096 && r.height * ratio < 4096) group.cache({ pixelRatio: ratio });
+      if (r.width * ratio < 4096 && r.height * ratio < 4096) {
+        group.cache({ pixelRatio: ratio });
+        setFrozen(true);
+      }
     }
     clearTimeout(settle.current);
     settle.current = setTimeout(resumeHits, 150);
@@ -710,7 +746,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
     e.preventDefault();
     e.stopPropagation();
     pauseHits();
-    const rect = wrapRef.current!.getBoundingClientRect();
+    const rect = wrapRect.current;
     const p = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     if (e.ctrlKey || e.metaKey) {
       const factor = Math.exp(-e.deltaY * 0.01); // trackpad pinch arrives as ctrl+wheel
@@ -737,9 +773,9 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   const onDblClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
     const { x, y, prev } = lastDown.current;
     if (!canEdit || tool !== "select" || Math.hypot(x - prev.x, y - prev.y) > 6) return;
-    const id = itemAt(e.target);
-    const hit = id ? byId.get(id) : undefined;
-    if (hit && (hit.type !== "frame" || (e.target as Konva.Node).getAttr("frameTitle"))) {
+    const picked = pickAt(e.target, pointer());
+    const hit = picked.id ? byId.get(picked.id) : undefined;
+    if (hit && (hit.type !== "frame" || picked.title)) {
       if (hit.type === "drawing" || !editable(hit.id)) return;
       setSelected([hit.id]);
       setEditing(hit.id);
@@ -797,7 +833,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
     const stage = stageRef.current;
     if (!stage) throw new Error("no stage");
     const pick = scope === "selection" ? items.filter((i) => selected.includes(i.id)) : items;
-    const regions = scope === "frames" ? frameOrder(items.filter((i): i is FrameItem => i.type === "frame")).map(boxOf) : [bounds(pick.map(boxOfAny))].filter((b): b is Box => !!b);
+    const regions = scope === "frames" ? frameOrder(frames).map(boxOf) : [bounds(pick.map(boxOfAny))].filter((b): b is Box => !!b);
     if (regions.length === 0) throw new Error("nothing to export");
     await preloadImages(items.filter((i): i is ImageItem => i.type === "image").map((i) => i.src));
     setExporting(true);
@@ -816,16 +852,26 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
 
   // ---------- render ----------
   // Viewport culling: only items in or near the view are drawn (all of them while exporting).
-  const margin = CULL_MARGIN / vp.scale;
-  const view = { x: -vp.x / vp.scale - margin, y: -vp.y / vp.scale - margin, w: size.w / vp.scale + margin * 2, h: size.h / vp.scale + margin * 2 };
-  const culled = exporting ? items : items.filter((i) => intersects(view, i.type === "connector" ? connectorBox(i, lookup) : i));
-  // Same items in view as last render: keep the same array, so a pan that reveals nothing new skips the items layer.
-  const lastVisible = useRef<Item[]>([]);
-  const prevVisible = lastVisible.current;
-  const visible = culled.length === prevVisible.length && culled.every((v, k) => v === prevVisible[k]) ? prevVisible : culled;
-  lastVisible.current = visible;
+  // While the board moves as a bitmap (see pauseHits), the items layer keeps what it drew: nothing is culled,
+  // re-rendered or re-drawn until the view settles.
+  const lastDrawn = useRef<{ visible: Item[]; scale: number; detail: Detail }>({ visible: [], scale: 1, detail: "full" });
+  let visible: Item[];
+  let detail: Detail;
+  let drawScale: number;
+  if (frozen && !exporting) {
+    ({ visible, detail, scale: drawScale } = lastDrawn.current);
+  } else {
+    const margin = CULL_MARGIN / vp.scale;
+    const view = { x: -vp.x / vp.scale - margin, y: -vp.y / vp.scale - margin, w: size.w / vp.scale + margin * 2, h: size.h / vp.scale + margin * 2 };
+    const culled = exporting ? items : items.filter((i) => intersects(view, i.type === "connector" ? connectorBox(i, lookup) : i));
+    // Same items in view as last render: keep the same array, so a pan that reveals nothing new skips the items layer.
+    const prevVisible = lastDrawn.current.visible;
+    visible = culled.length === prevVisible.length && culled.every((v, k) => v === prevVisible[k]) ? prevVisible : culled;
+    detail = vp.scale < LOW_DETAIL_BELOW && !exporting ? "low" : "full";
+    drawScale = vp.scale;
+    if (!exporting) lastDrawn.current = { visible, detail, scale: drawScale };
+  }
   motion.current = { count: visible.length, scale: vp.scale };
-  const detail: Detail = vp.scale < LOW_DETAIL_BELOW && !exporting ? "low" : "full";
   const peerSelections = peers.flatMap((p) => p.selection.map((id) => ({ id, color: p.color.fill })));
   const editingItem = editing ? byId.get(editing) : undefined;
   const selItems = selected.map((id) => byId.get(id)).filter((i): i is Item => Boolean(i));
@@ -925,7 +971,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
           >
             <Layer ref={layerRef}>
               <Group ref={itemsRef}>
-                <Items visible={visible} byId={byId} editing={editing} scale={vp.scale} detail={detail} onTransformEnd={onTransformEndStable} look={look} />
+                <Items visible={visible} byId={byId} editing={editing} scale={drawScale} detail={detail} onTransformEnd={onTransformEndStable} look={look} lifted={selectedSet} />
               </Group>
               {!exporting && peerSelections.map(({ id, color }) => {
                 const i = byId.get(id);
@@ -1009,20 +1055,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
       {/* What the canvas shows, for screen readers (and tests). */}
       <ItemList items={items} />
 
-      <div aria-hidden className="pointer-events-none absolute inset-0">
-        {peers.map((p) =>
-          p.cursor ? (
-            <div
-              key={p.clientId}
-              className="absolute left-0 top-0 transition-transform duration-75 ease-linear"
-              style={{ transform: `translate(${p.cursor.x * vp.scale + vp.x}px, ${p.cursor.y * vp.scale + vp.y}px)` }}
-            >
-              <svg width="18" height="18" viewBox="0 0 18 18"><path d="M1 1l6 15 2.2-6.3L16 7.5z" fill={p.color.fill} stroke="#fff" strokeWidth="1.2" /></svg>
-              <span className="ml-3 rounded-sm px-1.5 py-0.5 text-xs font-medium" style={{ background: p.color.fill, color: p.color.label }}>{p.name}</span>
-            </div>
-          ) : null,
-        )}
-      </div>
+      <Cursors store={cursors} vp={vp} />
 
       <header className="absolute left-3 right-3 top-3 flex items-start justify-between gap-3">
         <div className="flex h-12 min-w-0 items-center gap-1 rounded-md bg-bg px-2 shadow-toolbar">
@@ -1118,7 +1151,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
         open={exportOpen}
         onClose={() => setExportOpen(false)}
         hasSelection={selected.length > 0}
-        frameCount={items.filter((i) => i.type === "frame").length}
+        frameCount={frames.length}
         empty={items.length === 0}
         onExport={runExport}
       />
@@ -1265,7 +1298,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
       </div>
       {framesOpen && (
         <FramesPanel
-          frames={items.filter((i): i is FrameItem => i.type === "frame")}
+          frames={frames}
           canRename={canEdit}
           current={single?.type === "frame" ? single.id : null}
           onShow={(f) => {
@@ -1383,8 +1416,12 @@ function DragPreview({ drag, scale, shapeKind, ink, highlighter, width, look, lo
 }
 
 /** The board's items. Memoised on its props: panning re-renders it only when different items come into view. */
-const Items = memo(function Items({ visible, byId, editing, scale, detail, onTransformEnd, look }: { visible: Item[]; byId: Map<string, Item>; editing: string | null; scale: number; detail: Detail; onTransformEnd: () => void; look: BoardLook }) {
-  return visible.map((i) => (
+const Items = memo(function Items({ visible, byId, editing, scale, detail, onTransformEnd, look, lifted }: { visible: Item[]; byId: Map<string, Item>; editing: string | null; scale: number; detail: Detail; onTransformEnd: () => void; look: BoardLook; lifted: Set<string> }) {
+  // Far out: everything from one bulk shape, except the selected items (and the one being edited), which keep
+  // nodes of their own so the resize handles can attach to them; they are drawn on top.
+  const nodes = detail === "low" ? visible.filter((i) => lifted.has(i.id) || i.id === editing) : visible;
+  const bulk = detail === "low" ? (nodes.length ? visible.filter((i) => !lifted.has(i.id) && i.id !== editing) : visible) : null;
+  const views = nodes.map((i) => (
     <ItemView
       key={i.id}
       item={i}
@@ -1398,6 +1435,13 @@ const Items = memo(function Items({ visible, byId, editing, scale, detail, onTra
       look={look}
     />
   ));
+  if (!bulk) return views;
+  return (
+    <>
+      <BulkItems items={bulk} byId={byId} look={look} scale={scale} version={byId} />
+      {views}
+    </>
+  );
 });
 
 /** What the canvas shows, for screen readers (and tests). Memoised: it only changes with the items, not on pan or zoom. */

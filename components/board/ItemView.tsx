@@ -181,6 +181,17 @@ export const ItemView = memo(function ItemView({ item: i, editing, scale, detail
 // Loaded images are shared between every view of the same picture.
 const cache = new Map<string, HTMLImageElement>();
 
+/** The picture if it has loaded already (starts loading it otherwise): for drawing far out without a node per image. */
+export function loadedImage(src: string): HTMLImageElement | undefined {
+  let el = cache.get(src);
+  if (!el) {
+    el = new window.Image();
+    el.src = src;
+    cache.set(src, el);
+  }
+  return el.complete && el.naturalWidth ? el : undefined;
+}
+
 /** Resolves once every picture has loaded (or failed), so an export does not catch placeholders. */
 export function preloadImages(srcs: string[]): Promise<void> {
   return Promise.all(
