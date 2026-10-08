@@ -19,7 +19,7 @@ export function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () 
       onClose={onClose}
       onClick={(e) => e.target === ref.current && onClose()}
       aria-labelledby="shortcuts-title"
-      className="max-h-[calc(100vh-32px)] w-[min(720px,calc(100vw-32px))] overflow-y-auto rounded-lg bg-bg p-0 text-text shadow-pop backdrop:bg-black/30"
+      className="max-h-[calc(100vh-32px)] w-[min(960px,calc(100vw-32px))] overflow-y-auto rounded-lg bg-bg p-0 text-text shadow-pop backdrop:bg-black/30"
     >
       <div className="flex flex-col gap-4 p-6">
         <div className="flex items-center justify-between">
@@ -28,7 +28,7 @@ export function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () 
             <X size={18} aria-hidden />
           </button>
         </div>
-        <div className="grid gap-6 sm:grid-cols-3">
+        <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
           {t.shortcuts.groups.map((g) => (
             <section key={g.title} aria-labelledby={`sc-${g.title}`}>
               <h3 id={`sc-${g.title}`} className="mb-2 text-sm font-semibold">{g.title}</h3>
@@ -36,8 +36,10 @@ export function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () 
                 {g.keys.map(([keys, what]) => (
                   <div key={keys} className="flex items-baseline justify-between gap-3">
                     <dt className="text-text-muted">{what}</dt>
-                    <dd className="shrink-0">
-                      <kbd className="rounded-xs border border-border bg-surface px-1.5 py-0.5 font-mono text-xs">{keys}</kbd>
+                    <dd className="flex max-w-[55%] shrink-0 flex-wrap justify-end gap-1">
+                      {keys.split(" / ").map((k) => (
+                        <kbd key={k} className="whitespace-nowrap rounded-xs border border-border bg-surface px-1.5 py-0.5 font-mono text-xs">{k}</kbd>
+                      ))}
                     </dd>
                   </div>
                 ))}

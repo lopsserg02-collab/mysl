@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import * as Y from "yjs";
 import { IndexeddbPersistence } from "y-indexeddb";
 import { HocuspocusProvider } from "@hocuspocus/provider";
-import { itemsMap, readItem, sortItems, type Item } from "@/lib/board/model";
+import { itemsMap, metaMap, readItem, readMeta, sortItems, type BoardMeta, type Item } from "@/lib/board/model";
 import { colorForUser } from "@/lib/board/palette";
 
 export type ConnStatus = "connecting" | "connected" | "offline";
@@ -35,7 +35,9 @@ export function useBoardDoc(boardId: string, user: { id: string; name: string })
   const [peers, setPeers] = useState<Peer[]>([]);
   // True once the board content is loaded, from this browser's copy or from the server.
   const [ready, setReady] = useState(false);
-  const undo = useMemo(() => new Y.UndoManager(itemsMap(doc), { captureTimeout: 400 }), [doc]);
+  const [meta, setMetaState] = useState<BoardMeta>({});
+  // Items and board settings (background) share one undo history.
+  const undo = useMemo(() => new Y.UndoManager([itemsMap(doc), metaMap(doc)], { captureTimeout: 400 }), [doc]);
 
   useEffect(() => {
     // Offline first: the board opens from the browser's copy, then merges with the server.
@@ -120,15 +122,20 @@ export function useBoardDoc(boardId: string, user: { id: string; name: string })
     };
     map.observeDeep(sync);
     sync();
+    const meta = metaMap(doc);
+    const syncMeta = () => setMetaState(readMeta(doc));
+    meta.observe(syncMeta);
+    syncMeta();
     setProvider(p);
 
     return () => {
       map.unobserveDeep(sync);
+      meta.unobserve(syncMeta);
       p.awareness?.off("change", readPeers);
       p.destroy();
       local.destroy();
     };
   }, [boardId, doc, user.id, user.name]);
 
-  return { doc, provider, items, status, peers, undo, ready };
+  return { doc, provider, items, meta, status, peers, undo, ready };
 }

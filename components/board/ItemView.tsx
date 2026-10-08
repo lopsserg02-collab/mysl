@@ -2,7 +2,7 @@
 import { memo, useEffect, useState } from "react";
 import { Group, Rect, Shape, Text, Ellipse, Line, Arrow, Image as KImage } from "react-konva";
 import { connectorPoints, type Box, type Item } from "@/lib/board/model";
-import { CANVAS, FRAME, stickyPair } from "@/lib/board/palette";
+import { CANVAS, inkOn, stickyPair, type BoardLook } from "@/lib/board/palette";
 import { FONT, PAD, fittedFontSize, fontStyleOf } from "./text";
 
 const SHADOW = CANVAS.shadow;
@@ -18,16 +18,18 @@ export interface ItemViewProps {
   from?: Box;
   to?: Box;
   onTransformEnd?: () => void;
+  /** The board's background colours: the default ink and frames follow it. */
+  look: BoardLook;
 }
 export type Detail = "full" | "low";
 
 
 /** One board item drawn with Konva. Every node carries `itemId` so hit-testing can find the item. */
-export const ItemView = memo(function ItemView({ item: i, editing, scale, detail, from, to, onTransformEnd }: ItemViewProps) {
+export const ItemView = memo(function ItemView({ item: i, editing, scale, detail, from, to, onTransformEnd, look }: ItemViewProps) {
   const low = detail === "low";
   if (low && (i.type === "sticky" || i.type === "text" || i.type === "shape")) {
     // Far out, one plain node per item: thousands of them are on screen and every node costs a little to draw.
-    const fill = i.type === "sticky" ? stickyPair(i.color).fill : i.type === "text" ? i.color : i.fill === "none" ? "transparent" : stickyPair(i.fill).fill;
+    const fill = i.type === "sticky" ? stickyPair(i.color).fill : i.type === "text" ? inkOn(look, i.color) : i.fill === "none" ? "transparent" : stickyPair(i.fill).fill;
     return (
       <Rect
         id={`item-${i.id}`}
@@ -38,7 +40,7 @@ export const ItemView = memo(function ItemView({ item: i, editing, scale, detail
         height={i.h}
         fill={fill}
         opacity={i.type === "text" ? 0.2 : 1}
-        stroke={i.type === "shape" ? i.stroke : undefined}
+        stroke={i.type === "shape" ? inkOn(look, i.stroke) : undefined}
         strokeWidth={i.type === "shape" ? 1 : 0}
         strokeScaleEnabled={false}
         perfectDrawEnabled={false}
@@ -85,7 +87,7 @@ export const ItemView = memo(function ItemView({ item: i, editing, scale, detail
               fontStyle={fontStyleOf(i) || "normal"}
               textDecoration={i.underline ? "underline" : ""}
               lineHeight={1.3}
-              fill={i.color}
+              fill={inkOn(look, i.color)}
               wrap="word"
               listening={false}
             />
@@ -94,8 +96,9 @@ export const ItemView = memo(function ItemView({ item: i, editing, scale, detail
       );
     case "shape": {
       const fill = i.fill === "none" ? "transparent" : stickyPair(i.fill).fill;
-      const textColor = i.fill === "none" ? i.stroke : stickyPair(i.fill).text;
-      const common = { fill, stroke: i.stroke, strokeWidth: 2, strokeScaleEnabled: false, perfectDrawEnabled: false };
+      const stroke = inkOn(look, i.stroke);
+      const textColor = i.fill === "none" ? stroke : stickyPair(i.fill).text;
+      const common = { fill, stroke, strokeWidth: 2, strokeScaleEnabled: false, perfectDrawEnabled: false };
       return (
         <Group id={`item-${i.id}`} itemId={i.id} x={i.x} y={i.y} onTransformEnd={onTransformEnd}>
           {i.kind === "ellipse" ? (
@@ -116,7 +119,7 @@ export const ItemView = memo(function ItemView({ item: i, editing, scale, detail
         <Group id={`item-${i.id}`} itemId={i.id} x={i.x} y={i.y} onTransformEnd={onTransformEnd}>
           <Line
             points={i.points}
-            stroke={i.stroke}
+            stroke={inkOn(look, i.stroke)}
             strokeWidth={i.width}
             opacity={i.highlighter ? 0.35 : 1}
             lineCap="round"
@@ -140,22 +143,23 @@ export const ItemView = memo(function ItemView({ item: i, editing, scale, detail
             text={i.title || "Рамка"}
             fontSize={13 / scale}
             fontFamily={FONT}
-            fill={FRAME.title}
+            fill={look["frame-title"]}
             itemId={i.id}
             frameTitle
           />
-          <Rect width={i.w} height={i.h} fill={FRAME.fill} stroke={FRAME.border} strokeWidth={1} strokeScaleEnabled={false} />
+          <Rect width={i.w} height={i.h} fill={look["frame-fill"]} stroke={look["frame-border"]} strokeWidth={1} strokeScaleEnabled={false} />
         </Group>
       );
     case "connector": {
       const pts = connectorPoints(i, (id) => (id === i.from.itemId ? from : id === i.to.itemId ? to : undefined));
       const mid = midpoint(pts);
+      const stroke = inkOn(look, i.stroke);
       return (
         <Group id={`item-${i.id}`} itemId={i.id}>
           <Arrow
             points={pts}
-            stroke={i.stroke}
-            fill={i.stroke}
+            stroke={stroke}
+            fill={stroke}
             strokeWidth={2}
             strokeScaleEnabled={false}
             pointerLength={10}
@@ -166,7 +170,7 @@ export const ItemView = memo(function ItemView({ item: i, editing, scale, detail
             lineJoin="round"
           />
           {i.label && (
-            <Text x={mid.x} y={mid.y} offsetX={60} offsetY={10} width={120} align="center" text={i.label} fontSize={14} fontFamily={FONT} fill={i.stroke} padding={2} />
+            <Text x={mid.x} y={mid.y} offsetX={60} offsetY={10} width={120} align="center" text={i.label} fontSize={14} fontFamily={FONT} fill={stroke} padding={2} />
           )}
         </Group>
       );

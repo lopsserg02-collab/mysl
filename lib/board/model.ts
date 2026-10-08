@@ -102,6 +102,27 @@ export function itemsMap(doc: Y.Doc): Y.Map<Y.Map<unknown>> {
   return doc.getMap("items");
 }
 
+/** Board-wide settings everyone sees: background colour and grid style. */
+export interface BoardMeta {
+  bg?: string; // a name from the board background tokens, or "default"
+  grid?: "dots" | "lines" | "none";
+}
+
+export function metaMap(doc: Y.Doc): Y.Map<unknown> {
+  return doc.getMap("meta");
+}
+
+export function readMeta(doc: Y.Doc): BoardMeta {
+  return metaMap(doc).toJSON() as BoardMeta;
+}
+
+export function setMeta(doc: Y.Doc, patch: BoardMeta) {
+  const m = metaMap(doc);
+  doc.transact(() => {
+    for (const [k, v] of Object.entries(patch)) if (m.get(k) !== v) m.set(k, v);
+  });
+}
+
 export function readItem(m: Y.Map<unknown>): Item {
   return m.toJSON() as Item;
 }
