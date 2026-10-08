@@ -74,6 +74,8 @@ export interface DrawingItem extends Base {
 export interface FrameItem extends Base {
   type: "frame";
   title: string;
+  /** Place in the frames panel and in a frame-by-frame export; frames without one follow, in reading order. */
+  order?: number;
 }
 
 export interface ImageItem extends Base {
@@ -98,6 +100,27 @@ export const hasText = (i: Item): i is StickyItem | TextItem | ShapeItem => i.ty
 
 export function itemsMap(doc: Y.Doc): Y.Map<Y.Map<unknown>> {
   return doc.getMap("items");
+}
+
+/** Board-wide settings everyone sees: background colour and grid style. */
+export interface BoardMeta {
+  bg?: string; // a name from the board background tokens, or "default"
+  grid?: "dots" | "lines" | "none";
+}
+
+export function metaMap(doc: Y.Doc): Y.Map<unknown> {
+  return doc.getMap("meta");
+}
+
+export function readMeta(doc: Y.Doc): BoardMeta {
+  return metaMap(doc).toJSON() as BoardMeta;
+}
+
+export function setMeta(doc: Y.Doc, patch: BoardMeta) {
+  const m = metaMap(doc);
+  doc.transact(() => {
+    for (const [k, v] of Object.entries(patch)) if (m.get(k) !== v) m.set(k, v);
+  });
 }
 
 export function readItem(m: Y.Map<unknown>): Item {
@@ -378,6 +401,47 @@ export function itemsInside(frame: Box, items: Item[], exclude: string): string[
   return items
     .filter((i) => i.id !== exclude && i.type !== "connector" && i.x >= frame.x && i.y >= frame.y && i.x + i.w <= frame.x + frame.w && i.y + i.h <= frame.y + frame.h)
     .map((i) => i.id);
+}
+
+// ---------- frame order ----------
+
+const readingOrder = (a: FrameItem, b: FrameItem) => a.y - b.y || a.x - b.x || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+
+/** Frames in panel order: the ones someone has placed (by `order`), then the rest top to bottom, left to right. */
+export function frameOrder(frames: FrameItem[]): FrameItem[] {
+  return [...frames].sort((a, b) => {
+    const oa = a.order ?? Infinity;
+    const ob = b.order ?? Infinity;
+    return oa !== ob ? (oa < ob ? -1 : 1) : readingOrder(a, b);
+  });
+}
+
+/**
+ * Moves a frame to position `to` of the panel order, in one transaction (one undo step).
+ * When every frame already has its own number only the moved frame changes (to a value between its new
+ * neighbours), so two people reordering different frames at once do not overwrite each other;
+ * otherwise every frame is numbered afresh in the new order.
+ */
+export function moveFrame(doc: Y.Doc, id: string, to: number) {
+  const frames: FrameItem[] = [];
+  itemsMap(doc).forEach((m) => m.get("type") === "frame" && frames.push(readItem(m) as FrameItem));
+  const list = frameOrder(frames);
+  const from = list.findIndex((f) => f.id === id);
+  if (from < 0) return;
+  const target = Math.max(0, Math.min(list.length - 1, to));
+  if (target === from) return;
+  const [moved] = list.splice(from, 1);
+  list.splice(target, 0, moved);
+  const orders = frames.map((f) => f.order);
+  const numbered = orders.every((o) => typeof o === "number" && Number.isFinite(o)) && new Set(orders).size === orders.length;
+  if (numbered) {
+    const before = list[target - 1]?.order;
+    const after = list[target + 1]?.order;
+    const order = before === undefined ? after! - 1 : after === undefined ? before + 1 : (before + after) / 2;
+    // Halving runs out of precision after ~50 moves into the same gap: renumber then.
+    if (order !== before && order !== after) return updateItems(doc, [{ id, patch: { order } }]);
+  }
+  updateItems(doc, list.flatMap((f, n) => (f.order === n ? [] : [{ id: f.id, patch: { order: n } }])));
 }
 
 // ---------- lasso ----------

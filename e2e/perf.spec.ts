@@ -1,23 +1,60 @@
 import { test, expect, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
+import * as Y from "yjs";
+import { HocuspocusProvider } from "@hocuspocus/provider";
 import { boardReady, signIn } from "./helpers";
 
 // Performance budget: a board with 10,000 items stays interactive.
 // Seeds the board through the development hook, then each animation frame sends one wheel event (pan or zoom)
 // or one edit to a random item (as a collaborator would), and records the time between frames.
-// Results go to test-results/perf.json and the console. PERF_ITEMS changes the item count.
+// Collaborators are real realtime clients started by the test (Node), connected through the realtime server:
+// 50 of them move their cursors 30 times a second, and one of them edits a random item 60 times a second.
+// Results go to test-results/perf.json and the console. PERF_ITEMS changes the item count, PERF_CURSORS the cursors.
 const N = Number(process.env.PERF_ITEMS ?? 10_000);
+const CURSORS = Number(process.env.PERF_CURSORS ?? 50);
+const RT_URL = `ws://localhost:${process.env.E2E_RT_PORT ?? 1234}`;
 const FRAMES = 120;
 
 // Tracing snapshots the page on every step and would skew the timings.
-test.use({ trace: "off" });
+// PERF_BROWSER=firefox (or webkit) measures in another engine; leave PW_CHROMIUM unset then.
+test.use({ trace: "off", ...(process.env.PERF_BROWSER ? { browserName: process.env.PERF_BROWSER as "firefox" | "webkit" } : {}) });
 
-type Mode = "pan" | "zoom" | "edit";
+type Mode = "pan" | "zoom" | "edit" | "idle";
 type Stats = { frames: number; meanMs: number; p50Ms: number; p95Ms: number; maxMs: number; fps: number };
-type Hook = { seed: (n: number) => number; touch: () => void };
+type Hook = { seed: (n: number) => number; touch: () => void; onScreen: () => number };
 
-async function measure(page: Page, mode: Mode): Promise<Stats> {
+/** PERF_PROFILE=1: a CPU profile of each measurement, summed by function (self time), printed to the console. */
+async function profiled<T>(page: Page, label: string, run: () => Promise<T>): Promise<T> {
+  if (!process.env.PERF_PROFILE) return run();
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Profiler.enable");
+  await cdp.send("Profiler.setSamplingInterval", { interval: 200 });
+  await cdp.send("Profiler.start");
+  const out = await run();
+  const { profile } = (await cdp.send("Profiler.stop")) as { profile: { nodes: { id: number; callFrame: { functionName: string; url: string; lineNumber: number } }[]; samples: number[]; timeDeltas: number[] } };
+  const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+  const self = new Map<string, number>();
+  let total = 0;
+  profile.samples.forEach((id, k) => {
+    const n = byId.get(id)!;
+    const f = n.callFrame;
+    const key = `${f.functionName || "(anon)"} ${f.url.split("/").pop()}:${f.lineNumber}`;
+    const dt = profile.timeDeltas[k] / 1000;
+    total += dt;
+    self.set(key, (self.get(key) ?? 0) + dt);
+  });
+  const top = [...self].sort((a, b) => b[1] - a[1]).slice(0, 25);
+  console.log(`PROFILE ${label} total ${Math.round(total)} ms\n` + top.map(([k, v]) => `  ${v.toFixed(0).padStart(6)} ms  ${k}`).join("\n"));
+  await cdp.detach();
+  return out;
+}
+
+async function measure(page: Page, mode: Mode, label: string = mode): Promise<Stats> {
+  return profiled(page, label, () => measureRaw(page, mode));
+}
+
+async function measureRaw(page: Page, mode: Mode): Promise<Stats> {
   const times = await page.evaluate(
     ({ frames, mode }) =>
       new Promise<number[]>((resolve) => {
@@ -31,7 +68,9 @@ async function measure(page: Page, mode: Mode): Promise<Stats> {
           if (last) out.push(now - last);
           last = now;
           if (mode === "edit") hook.touch();
-          else {
+          else if (mode === "idle") {
+            // nothing: what other people do (cursors, edits) is all that changes
+          } else {
             const zoom = mode === "zoom";
             // Pan in a slow circle so the view keeps moving over new items; zoom in, then out, around the centre.
             const deltaY = zoom ? (k % 60 < 30 ? -6 : 6) : Math.sin(k / 10) * 12;
@@ -51,6 +90,58 @@ async function measure(page: Page, mode: Mode): Promise<Stats> {
   const mean = times.reduce((a, b) => a + b, 0) / times.length;
   const r = (v: number) => Math.round(v * 10) / 10;
   return { frames: times.length, meanMs: r(mean), p50Ms: r(q(0.5)), p95Ms: r(q(0.95)), maxMs: r(sorted.at(-1)!), fps: r(1000 / mean) };
+}
+
+/** Realtime clients joining the board as the signed-in user would, from Node. */
+async function collaborators(page: Page, boardId: string, n: number) {
+  const res = await page.request.post("/api/realtime-token", { data: { boardId } });
+  const { token } = (await res.json()) as { token: string };
+  const clients = await Promise.all(
+    Array.from({ length: n }, (_, k) => {
+      const doc = new Y.Doc();
+      return new Promise<{ doc: Y.Doc; provider: HocuspocusProvider }>((resolve) => {
+        const provider = new HocuspocusProvider({ url: RT_URL, name: `board:${boardId}`, document: doc, token, onSynced: () => resolve({ doc, provider }) });
+        provider.awareness?.setLocalStateField("user", { userId: `bot-${k}`, name: `Гость ${k + 1}`, color: { fill: "#4262ff", label: "#ffffff" } });
+      });
+    }),
+  );
+  let timers: ReturnType<typeof setInterval>[] = [];
+  const stop = () => {
+    timers.forEach(clearInterval);
+    timers = [];
+  };
+  return {
+    /** Every client moves its cursor in a circle around `centre` (board units), 30 times a second. */
+    cursors(centre: { x: number; y: number }) {
+      let t = 0;
+      timers.push(
+        setInterval(() => {
+          t++;
+          clients.forEach(({ provider }, k) => {
+            const a = t / 15 + (k * 2 * Math.PI) / clients.length;
+            provider.awareness?.setLocalStateField("cursor", { x: Math.round(centre.x + Math.cos(a) * (200 + k * 8)), y: Math.round(centre.y + Math.sin(a) * (150 + k * 5)) });
+          });
+        }, 33),
+      );
+    },
+    /** The first client moves a random item by a unit, 60 times a second. */
+    edits() {
+      const { doc } = clients[0];
+      const items = doc.getMap<Y.Map<unknown>>("items");
+      const ids = [...items.keys()].filter((id) => items.get(id)!.get("type") !== "connector");
+      timers.push(
+        setInterval(() => {
+          const m = items.get(ids[Math.floor(Math.random() * ids.length)]);
+          if (m) doc.transact(() => m.set("x", (m.get("x") as number) + 1));
+        }, 16),
+      );
+    },
+    stop,
+    destroy() {
+      stop();
+      clients.forEach(({ provider }) => provider.destroy());
+    },
+  };
 }
 
 async function zoomTo(page: Page, label: string, presses: number) {
@@ -76,20 +167,57 @@ test(`perf: ${N} items, pan and zoom frame times`, async ({ page }) => {
   // Whole board in view: every item is on screen, drawn in low detail.
   await page.keyboard.press("Shift+1");
   await page.waitForTimeout(500);
-  results.panFit = await measure(page, "pan");
-  results.zoomFit = await measure(page, "zoom");
+  const shot = async (name: string) => process.env.PERF_SHOTS && (await page.screenshot({ path: path.join(process.env.PERF_SHOTS, `${name}.png`) }));
+  await shot("fit");
+  results.onScreenFit = await page.evaluate(() => (window as unknown as { __mysl: Partial<Hook> }).__mysl.onScreen?.() ?? null);
+  results.panFit = await measure(page, "pan", "panFit");
+  results.zoomFit = await measure(page, "zoom", "zoomFit");
+  results.editFit = await measure(page, "edit", "editFit");
   // 100%: the usual working zoom, a couple of dozen items on screen.
   await page.keyboard.press("Shift+1");
   await zoomTo(page, "100%", 0);
-  results.pan100 = await measure(page, "pan");
-  results.zoom100 = await measure(page, "zoom");
-  results.edit100 = await measure(page, "edit");
+  results.pan100 = await measure(page, "pan", "pan100");
+  results.zoom100 = await measure(page, "zoom", "zoom100");
+  results.edit100 = await measure(page, "edit", "edit100");
   // 50%: about a hundred items in full detail.
   await zoomTo(page, "50%", 2);
-  results.pan50 = await measure(page, "pan");
+  results.pan50 = await measure(page, "pan", "pan50");
   // 25%: a few hundred items, low detail.
   await zoomTo(page, "25%", 3);
-  results.pan25 = await measure(page, "pan");
+  await shot("25");
+  results.pan25 = await measure(page, "pan", "pan25");
+
+  // Other people on the board, through the realtime server.
+  const boardId = /\/board\/([0-9a-f-]{36})/.exec(page.url())![1];
+  const others = await collaborators(page, boardId, CURSORS);
+  try {
+    await zoomTo(page, "100%", 0);
+    // The view centre in board units, so the cursors are on screen.
+    const box = await page.locator(".konvajs-content").boundingBox();
+    const centre = await page.evaluate(({ w, h }) => {
+      const stage = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages[0];
+      return { x: (w / 2 - stage.x()) / stage.scaleX(), y: (h / 2 - stage.y()) / stage.scaleX() };
+    }, { w: box!.width, h: box!.height });
+    results.remoteEdit100 = await (async () => {
+      others.edits();
+      await page.waitForTimeout(500);
+      const s = await measure(page, "idle", "remoteEdit100");
+      others.stop();
+      return s;
+    })();
+    others.cursors(centre);
+    // Everyone is on the board: four faces and a count of the rest.
+    if (CURSORS > 4) await expect(page.getByRole("img", { name: `Ещё ${CURSORS - 4} на доске` })).toBeVisible();
+    await page.waitForTimeout(500);
+    results.cursors = CURSORS;
+    results.cursorsIdle100 = await measure(page, "idle", "cursorsIdle100");
+    await shot("cursors");
+    results.cursorsPan100 = await measure(page, "pan", "cursorsPan100");
+    others.edits();
+    results.cursorsRemoteEdit100 = await measure(page, "idle", "cursorsRemoteEdit100");
+  } finally {
+    others.destroy();
+  }
 
   console.log(JSON.stringify(results, null, 2));
   fs.mkdirSync("test-results", { recursive: true });

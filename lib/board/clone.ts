@@ -23,6 +23,9 @@ export function cloneBoardState(state: Uint8Array | null, assets: Map<string, st
       for (const [k, v] of Object.entries(item)) copy.set(k, v);
       to.set(id, copy);
     });
+    // Board settings (background, grid) come along too.
+    const meta = dst.getMap("meta");
+    src.getMap("meta").forEach((v, k) => meta.set(k, v));
   });
   return Y.encodeStateAsUpdate(dst);
 }

@@ -40,3 +40,24 @@ export function colorForUser(id: string) {
 export const INK = [tokens.color.text, ...CURSOR_COLORS.slice(0, 7).map((c) => c.fill)];
 export const DEFAULT_INK = INK[0];
 export const FRAME = { fill: tokens.color["frame-fill"], title: tokens.color["frame-title"], border: tokens.color.border };
+
+// ---------- board background ----------
+
+export type BoardLook = { bg: string; grid: string; ink: string; "frame-fill": string; "frame-title": string; "frame-border": string; selection: string; dark: boolean };
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const { _about, ...boardTokens } = tokens.color.board;
+export const BOARD_BGS = boardTokens as Record<string, BoardLook>;
+export type BoardBg = "default" | keyof typeof boardTokens;
+export const BOARD_BG_NAMES: BoardBg[] = ["default", ...(Object.keys(boardTokens) as BoardBg[])];
+export type GridStyle = "dots" | "lines" | "none";
+export const GRID_STYLES: GridStyle[] = ["dots", "lines", "none"];
+
+/** Colours a board draws with: the theme's canvas for "default", otherwise the chosen background. */
+export function boardLook(bg: string | undefined): BoardLook & { custom: boolean } {
+  const chosen = bg && bg !== "default" ? BOARD_BGS[bg] : undefined;
+  if (chosen) return { ...chosen, custom: true };
+  return { bg: CANVAS.bg, grid: CANVAS.grid, ink: DEFAULT_INK, "frame-fill": FRAME.fill, "frame-title": FRAME.title, "frame-border": FRAME.border, selection: CANVAS.selection, dark: false, custom: false };
+}
+
+/** The ink an item is drawn with: the default ink follows the board, so it stays readable on a dark one. */
+export const inkOn = (look: { ink: string }, color: string) => (color === DEFAULT_INK ? look.ink : color);

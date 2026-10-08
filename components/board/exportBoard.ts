@@ -8,8 +8,8 @@ export type ExportScope = "board" | "selection" | "frames";
 const PAD = 40; // board units of margin around exported content
 const MAX_SIDE = 8000; // browsers refuse canvases much larger than this
 
-/** Renders a region of the board (board coordinates) to a canvas on white, at `quality` pixels per board unit. */
-export function renderRegion(stage: Konva.Stage, vp: Viewport, box: Box, quality: number, pad = PAD): HTMLCanvasElement {
+/** Renders a region of the board (board coordinates) to a canvas on the board's background (white by default), at `quality` pixels per board unit. */
+export function renderRegion(stage: Konva.Stage, vp: Viewport, box: Box, quality: number, pad = PAD, background = "#ffffff"): HTMLCanvasElement {
   const b = { x: box.x - pad, y: box.y - pad, w: box.w + pad * 2, h: box.h + pad * 2 };
   const perUnit = Math.min(quality, MAX_SIDE / b.w, MAX_SIDE / b.h);
   const shot = stage.toCanvas({
@@ -23,7 +23,7 @@ export function renderRegion(stage: Konva.Stage, vp: Viewport, box: Box, quality
   out.width = shot.width;
   out.height = shot.height;
   const ctx = out.getContext("2d")!;
-  ctx.fillStyle = "#ffffff";
+  ctx.fillStyle = background;
   ctx.fillRect(0, 0, out.width, out.height);
   ctx.drawImage(shot, 0, 0);
   return out;
