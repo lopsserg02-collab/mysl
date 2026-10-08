@@ -1,21 +1,25 @@
 "use client";
 import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
-import { Link2, UserPlus, X } from "lucide-react";
+import { Link2, RefreshCw, UserPlus, X } from "lucide-react";
 import type { BoardRole, LinkAccess, Person, ShareRole } from "@/lib/data/types";
-import { cancelInvite, listPeople, setLinkAccess, setMemberRole, shareBoard } from "@/app/actions";
+import { cancelInvite, getShareSecret, listPeople, resetShareSecret, setGuestView, setLinkAccess, setMemberRole, shareBoard } from "@/app/actions";
 import { t } from "@/lib/copy";
 
 const SHARE_ROLES: ShareRole[] = ["editor", "commenter", "viewer"];
 const LINK: LinkAccess[] = ["private", "view", "comment", "edit"];
 
 /** S08: invite by email, link access, and the people on the board. Everyone sees it; only owners change it. */
-export function ShareDialog(props: { boardId: string; role: BoardRole; userId: string; linkAccess: LinkAccess; open: boolean; onClose: () => void }) {
+export function ShareDialog(props: { boardId: string; role: BoardRole; userId: string; linkAccess: LinkAccess; guestView: boolean; open: boolean; onClose: () => void }) {
   const { boardId, userId, open, onClose } = props;
   const manage = props.role === "owner" || props.role === "coowner";
   const ref = useRef<HTMLDialogElement>(null);
   const [people, setPeople] = useState<Person[] | null>(null);
   const [link, setLink] = useState(props.linkAccess);
+  const [guests, setGuests] = useState(props.guestView);
+  // The link carries the board's secret: the id alone opens nothing. Fetched when the dialog opens.
+  const [secret, setSecret] = useState<string | null>(null);
+  const shareUrl = secret && typeof location !== "undefined" ? `${location.origin}/board/${boardId}?k=${secret}` : "";
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<ShareRole>("editor");
   const [message, setMessage] = useState<{ text: string; error?: boolean; plans?: boolean } | null>(null);
@@ -31,6 +35,7 @@ export function ShareDialog(props: { boardId: string; role: BoardRole; userId: s
       d.showModal();
       setMessage(null);
       void refresh();
+      getShareSecret(boardId).then(setSecret, () => setSecret(null));
     } else if (!open && d.open) d.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -66,7 +71,8 @@ export function ShareDialog(props: { boardId: string; role: BoardRole; userId: s
   };
 
   const copy = async () => {
-    await navigator.clipboard.writeText(`${location.origin}/board/${boardId}`).catch(() => {});
+    if (!shareUrl) return;
+    await navigator.clipboard.writeText(shareUrl).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -143,11 +149,51 @@ export function ShareDialog(props: { boardId: string; role: BoardRole; userId: s
                 <option key={a} value={a}>{t.share.link[a]}</option>
               ))}
             </select>
-            <button type="button" onClick={copy} className="flex h-10 items-center justify-center gap-2 rounded-md border border-border-input px-3 font-medium hover:bg-surface-hover">
+            <button type="button" onClick={copy} disabled={!shareUrl} className="flex h-10 items-center justify-center gap-2 rounded-md border border-border-input px-3 font-medium hover:bg-surface-hover disabled:opacity-60">
               <Link2 size={16} aria-hidden /> {copied ? t.share.copied : t.share.copy}
             </button>
           </div>
-          {link !== "private" && <p className="text-xs text-text-muted">{t.share.linkNote}</p>}
+          {link !== "private" && (
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={guests}
+                disabled={!manage || pending}
+                onChange={(e) => {
+                  const next = e.target.checked;
+                  setGuests(next);
+                  run(() => setGuestView(boardId, next));
+                }}
+                className="mt-0.5 h-4 w-4 accent-[var(--color-accent)]"
+              />
+              <span>{t.share.guestView}</span>
+            </label>
+          )}
+          {link !== "private" && <p className="text-xs text-text-muted">{guests ? t.share.guestNote : t.share.linkNote}</p>}
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <input
+              readOnly
+              aria-label={t.share.linkField}
+              value={shareUrl}
+              onFocus={(e) => e.currentTarget.select()}
+              className="h-9 min-w-0 flex-1 rounded-md border border-border-input bg-surface px-2 text-xs text-text-muted"
+            />
+            {manage && (
+              <button
+                type="button"
+                disabled={pending}
+                onClick={() =>
+                  run(async () => {
+                    setSecret(await resetShareSecret(boardId));
+                    setMessage({ text: t.share.resetDone });
+                  })
+                }
+                className="flex h-9 items-center justify-center gap-2 rounded-md px-2 text-sm font-medium text-text-muted hover:bg-surface-hover hover:text-text disabled:opacity-60"
+              >
+                <RefreshCw size={14} aria-hidden /> {t.share.reset}
+              </button>
+            )}
+          </div>
         </section>
 
         <section aria-labelledby="people-title" className="flex flex-col gap-2">

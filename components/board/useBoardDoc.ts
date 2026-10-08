@@ -17,17 +17,18 @@ export interface Peer {
   selection: string[];
 }
 
-async function fetchToken(boardId: string): Promise<string> {
+async function fetchToken(boardId: string, guestSecret?: string): Promise<string> {
   const res = await fetch("/api/realtime-token", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ boardId }),
+    body: JSON.stringify(guestSecret ? { boardId, k: guestSecret } : { boardId }),
   });
   if (!res.ok) throw new Error(`token ${res.status}`);
   return (await res.json()).token;
 }
 
-export function useBoardDoc(boardId: string, user: { id: string; name: string }) {
+/** guestSecret: viewing by link without signing in. Guests keep no copy of the board in this browser. */
+export function useBoardDoc(boardId: string, user: { id: string; name: string }, guestSecret?: string) {
   const doc = useMemo(() => new Y.Doc(), [boardId]);
   const [provider, setProvider] = useState<HocuspocusProvider | null>(null);
   const [items, setItems] = useState<Item[]>([]);
@@ -39,21 +40,40 @@ export function useBoardDoc(boardId: string, user: { id: string; name: string })
 
   useEffect(() => {
     // Offline first: the board opens from the browser's copy, then merges with the server.
-    const local = new IndexeddbPersistence(`mysl-board-${boardId}`, doc);
+    const local = guestSecret ? null : new IndexeddbPersistence(`mysl-board-${boardId}`, doc);
     let localLoaded = false;
-    local.whenSynced.then(() => {
+    let online = navigator.onLine;
+    let socket: ConnStatus = "connecting";
+    // No network at all says more than the socket's own state, which keeps "connecting" while it retries.
+    const report = () => setStatus(online ? socket : "offline");
+    local?.whenSynced.then(() => {
       localLoaded = true;
       // An empty local copy says nothing; wait for the server unless we are offline.
-      if (itemsMap(doc).size > 0) setReady(true);
+      if (itemsMap(doc).size > 0 || !online) setReady(true);
     });
+    const onOnline = () => {
+      online = true;
+      report();
+      // Reconnect now rather than at the end of the retry backoff; the edits made offline then merge.
+      void p.configuration.websocketProvider.connect();
+    };
+    const onOffline = () => {
+      online = false;
+      report();
+      if (localLoaded) setReady(true);
+    };
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    report();
     const url = process.env.NEXT_PUBLIC_REALTIME_URL ?? "ws://localhost:1234";
     const p = new HocuspocusProvider({
       url,
       name: `board:${boardId}`,
       document: doc,
-      token: () => fetchToken(boardId),
+      token: () => fetchToken(boardId, guestSecret),
       onStatus: ({ status }) => {
-        setStatus(status === "connected" ? "connected" : status === "connecting" ? "connecting" : "offline");
+        socket = status === "connected" ? "connected" : status === "connecting" ? "connecting" : "offline";
+        report();
         if (status === "disconnected" && localLoaded) setReady(true);
       },
       onSynced: () => setReady(true),
@@ -126,9 +146,11 @@ export function useBoardDoc(boardId: string, user: { id: string; name: string })
       map.unobserveDeep(sync);
       p.awareness?.off("change", readPeers);
       p.destroy();
-      local.destroy();
+      local?.destroy();
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
     };
-  }, [boardId, doc, user.id, user.name]);
+  }, [boardId, doc, user.id, user.name, guestSecret]);
 
   return { doc, provider, items, status, peers, undo, ready };
 }

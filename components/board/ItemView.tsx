@@ -177,17 +177,29 @@ export const ItemView = memo(function ItemView({ item: i, editing, scale, detail
 // Loaded images are shared between every view of the same picture.
 const cache = new Map<string, HTMLImageElement>();
 
+// A guest (viewing by link, not signed in) proves access to each image with the board's link secret.
+let guestSecret: string | null = null;
+export function setGuestAssetSecret(secret: string | null) {
+  guestSecret = secret;
+}
+const resolve = (src: string) => (guestSecret && src.startsWith("/api/assets/") ? `${src}?k=${encodeURIComponent(guestSecret)}` : src);
+
+function load(src: string): HTMLImageElement {
+  const url = resolve(src);
+  let el = cache.get(url);
+  if (!el) {
+    el = new window.Image();
+    el.src = url;
+    cache.set(url, el);
+  }
+  return el;
+}
+
 /** Resolves once every picture has loaded (or failed), so an export does not catch placeholders. */
 export function preloadImages(srcs: string[]): Promise<void> {
   return Promise.all(
     srcs.map((src) => {
-      let el = cache.get(src);
-      if (!el) {
-        el = new window.Image();
-        el.src = src;
-        cache.set(src, el);
-      }
-      const img = el;
+      const img = load(src);
       return img.complete ? Promise.resolve() : new Promise<void>((done) => {
         img.addEventListener("load", () => done(), { once: true });
         img.addEventListener("error", () => done(), { once: true });
@@ -197,23 +209,18 @@ export function preloadImages(srcs: string[]): Promise<void> {
 }
 
 function BoardImage({ src, w, h }: { src: string; w: number; h: number }) {
-  const [img, setImg] = useState<HTMLImageElement | null>(() => (cache.get(src)?.complete ? cache.get(src)! : null));
+  const [img, setImg] = useState<HTMLImageElement | null>(() => (cache.get(resolve(src))?.complete ? cache.get(resolve(src))! : null));
   const [failed, setFailed] = useState(false);
   useEffect(() => {
-    let el = cache.get(src);
-    if (!el) {
-      el = new window.Image();
-      el.src = src;
-      cache.set(src, el);
-    }
+    const el = load(src);
     if (el.complete && el.naturalWidth) return setImg(el);
-    const ok = () => setImg(el!);
+    const ok = () => setImg(el);
     const bad = () => setFailed(true);
     el.addEventListener("load", ok);
     el.addEventListener("error", bad);
     return () => {
-      el!.removeEventListener("load", ok);
-      el!.removeEventListener("error", bad);
+      el.removeEventListener("load", ok);
+      el.removeEventListener("error", bad);
     };
   }, [src]);
   // Placeholder while loading (or if the file is gone) keeps the item visible and clickable.

@@ -6,7 +6,7 @@ import type Konva from "konva";
 import {
   ArrowLeft, Hand, MousePointer2, StickyNote, Type, Square, Circle, Triangle, Diamond, RectangleHorizontal, MoveUpRight, Pen, Highlighter, Eraser, Frame,
   Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Copy, Trash2, BringToFront, SendToBack, WifiOff, Lock, Unlock, CornerDownRight, ArrowRight, Share2, MessageCircle, ImagePlus, Download,
-  Bold, Italic, Underline, Slash, Spline, Lasso, Group as GroupIcon, Ungroup, PanelRight,
+  Bold, Italic, Underline, Slash, Spline, Lasso, Group as GroupIcon, Ungroup, PanelRight, Eye, LogIn,
 } from "lucide-react";
 import { canComment, type BoardRole, type LinkAccess } from "@/lib/data/types";
 import { t } from "@/lib/copy";
@@ -22,7 +22,7 @@ import { seedGrid } from "@/lib/board/bench";
 import { renameBoard } from "@/app/actions";
 import { useBoardDoc } from "./useBoardDoc";
 import { bounds, fitTo, intersects, stepZoom, toBoard, zoomAt, type Viewport } from "./viewport";
-import { ItemView, preloadImages, type Detail } from "./ItemView";
+import { ItemView, preloadImages, setGuestAssetSecret, type Detail } from "./ItemView";
 import { FramesPanel } from "./FramesPanel";
 import { ExportDialog } from "./ExportDialog";
 import { download, fileName, renderRegion, toPdfBlob, toPngBlob, type ExportFormat, type ExportScope } from "./exportBoard";
@@ -56,15 +56,25 @@ type Drag =
 
 const rectFrom = (a: Pt, b: Pt): Box => ({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) });
 
-export function Board({ board, role, user, unread }: { board: { id: string; name: string; linkAccess: LinkAccess }; role: BoardRole; user: { id: string; name: string }; unread?: number }) {
+export interface GuestAccess {
+  /** The board's link secret from the address the guest opened. */
+  secret: string;
+  /** Sign in, then come back to this board. */
+  signIn: string;
+}
+
+export function Board({ board, role, user, unread, guest }: { board: { id: string; name: string; linkAccess: LinkAccess; guestView: boolean }; role: BoardRole; user: { id: string; name: string }; unread?: number; guest?: GuestAccess }) {
+  // Guests prove access to each image with the link secret. Set before any image renders.
+  setGuestAssetSecret(guest?.secret ?? null);
   const [shareOpen, setShareOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState(false); // draws every item, not just what is on screen, and hides selection
   const [commentDraft, setCommentDraft] = useState<CommentDraft | null>(null);
-  const mayComment = canComment(role);
-  const canEdit = role === "owner" || role === "coowner" || role === "editor";
-  const canRename = role === "owner" || role === "coowner";
-  const { doc, provider, items, status, peers, undo, ready } = useBoardDoc(board.id, user);
+  // Guests only ever view; the server enforces it too (read-only realtime token, no session for actions).
+  const mayComment = !guest && canComment(role);
+  const canEdit = !guest && (role === "owner" || role === "coowner" || role === "editor");
+  const canRename = !guest && (role === "owner" || role === "coowner");
+  const { doc, provider, items, status, peers, undo, ready } = useBoardDoc(board.id, user, guest?.secret);
 
   // Hook for the performance benchmark (e2e/perf.spec.ts) to seed a big board: development only, or a
   // production build made with NEXT_PUBLIC_PERF_HOOK=1 to measure without development-mode React.
@@ -977,7 +987,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
           {peers.map((p) => (
             <Avatar key={p.clientId} name={p.name} color={p.color.fill} label={p.name} />
           ))}
-          <NotificationBell initialUnread={unread} />
+          {!guest && <NotificationBell initialUnread={unread} />}
           <button
             type="button"
             onClick={() => setExportOpen(true)}
@@ -987,16 +997,29 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
           >
             <Download size={18} aria-hidden />
           </button>
-          <button
-            type="button"
-            onClick={() => setShareOpen(true)}
-            className="ml-1 flex h-9 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-on-accent hover:bg-accent-hover"
-          >
-            <Share2 size={16} aria-hidden /> <span className="hidden sm:inline">{t.share.open}</span>
-            <span className="sr-only sm:hidden">{t.share.open}</span>
-          </button>
+          {guest ? (
+            <Link href={guest.signIn} className="ml-1 flex h-9 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-on-accent hover:bg-accent-hover">
+              <LogIn size={16} aria-hidden /> {t.guest.signIn}
+            </Link>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setShareOpen(true)}
+              className="ml-1 flex h-9 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-on-accent hover:bg-accent-hover"
+            >
+              <Share2 size={16} aria-hidden /> <span className="hidden sm:inline">{t.share.open}</span>
+              <span className="sr-only sm:hidden">{t.share.open}</span>
+            </button>
+          )}
         </div>
       </header>
+      {guest && (
+        <div role="note" className="absolute left-1/2 top-[72px] flex max-w-[calc(100%-32px)] -translate-x-1/2 items-center gap-3 rounded-md bg-bg px-3 py-2 text-sm shadow-pop">
+          <Eye size={16} aria-hidden className="shrink-0 text-text-muted" />
+          <span>{t.guest.banner}</span>
+          <Link href={guest.signIn} className="shrink-0 font-semibold text-accent underline underline-offset-2">{t.guest.signIn}</Link>
+        </div>
+      )}
       <input
         ref={fileInput}
         type="file"
@@ -1021,7 +1044,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
           )}
         </div>
       )}
-      <Comments
+      {!guest && <Comments
         boardId={board.id}
         userId={user.id}
         canComment={mayComment}
@@ -1031,7 +1054,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
         provider={provider}
         draft={commentDraft}
         onDraftDone={() => setCommentDraft(null)}
-      />
+      />}
       <ExportDialog
         open={exportOpen}
         onClose={() => setExportOpen(false)}
@@ -1040,7 +1063,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
         empty={items.length === 0}
         onExport={runExport}
       />
-      <ShareDialog boardId={board.id} role={role} userId={user.id} linkAccess={board.linkAccess} open={shareOpen} onClose={() => setShareOpen(false)} />
+      {!guest && <ShareDialog boardId={board.id} role={role} userId={user.id} linkAccess={board.linkAccess} guestView={board.guestView} open={shareOpen} onClose={() => setShareOpen(false)} />}
 
       <nav aria-label="Инструменты" className="absolute left-3 top-1/2 flex max-h-[calc(100%-140px)] -translate-y-1/2 flex-col gap-1 overflow-y-auto rounded-md bg-bg p-1 shadow-toolbar">
         <ToolButton label={t.board.select} active={tool === "select"} onClick={() => setTool("select")}><MousePointer2 size={20} /></ToolButton>

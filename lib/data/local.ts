@@ -1,9 +1,9 @@
 // Development data layer: one JSON file under .data/. Same signatures as the Supabase layer.
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { cloneBoardState } from "../board/clone";
-import { AccessError, SHARE_ROLES, TRASH_DAYS, canComment, canEditBoard, linkRole, type AppNotification, type Board, type BoardListItem, type Asset, type BoardRole, type Comment, type CommentThread, type DataLayer, type Person, type ShareRole, type Subscription, type BillingWriter, type BoardUsage, type User } from "./types";
+import { AccessError, LINK_SECRET, SHARE_ROLES, TRASH_DAYS, canComment, canEditBoard, linkRole, type AppNotification, type Board, type BoardListItem, type Asset, type BoardRole, type Comment, type CommentThread, type DataLayer, type Person, type ShareRole, type Subscription, type BillingWriter, type BoardUsage, type User } from "./types";
 
 interface Db {
   users: User[];
@@ -18,6 +18,8 @@ interface Db {
   notifications?: { id: string; userId: string; kind: "mention" | "invite"; boardId: string; commentId: string | null; actorId: string; readAt: string | null; createdAt: string }[];
   subscriptions?: (Subscription & { lastEventAt: string | null })[];
   stripeEvents?: { id: string; type: string; receivedAt: string }[];
+  /** Each board's link secret (boards.link_token in Postgres), kept apart so board objects never carry it. */
+  linkSecrets?: Record<string, string>;
 }
 
 const DATA_DIR = process.env.DATA_DIR ?? path.join(process.cwd(), ".data");
@@ -72,6 +74,22 @@ async function docModifiedTimes(): Promise<Map<string, string>> {
 const latest = (a: string, b?: string) => (b && b > a ? b : a);
 
 const now = () => new Date().toISOString();
+const newSecret = () => randomBytes(16).toString("hex");
+
+function secretOf(db: Db, boardId: string): string {
+  db.linkSecrets ??= {};
+  return (db.linkSecrets[boardId] ??= newSecret());
+}
+
+/** True when the given link secret is the board's own; compared in constant time. */
+function secretMatches(db: Db, boardId: string, secret: string): boolean {
+  const own = db.linkSecrets?.[boardId];
+  if (!own || typeof secret !== "string" || !LINK_SECRET.test(secret) || own.length !== secret.length) return false;
+  return timingSafeEqual(Buffer.from(own), Buffer.from(secret));
+}
+
+/** Boards saved before guest viewing existed have no guestView field. */
+const withDefaults = (b: Board): Board => ({ ...b, guestView: b.guestView ?? false });
 const canManage = (r: BoardRole | null) => r === "owner" || r === "coowner";
 
 function requireManager(db: Db, boardId: string, userId: string): Board {
@@ -186,7 +204,7 @@ export const localData: DataLayer = {
         if (Boolean(opts.trashed) !== Boolean(b.deletedAt)) continue;
         if (opts.starredOnly && !m.starred) continue;
         if (q && !b.name.toLowerCase().includes(q)) continue;
-        rows.push({ ...b, updatedAt: latest(b.updatedAt, docTimes.get(b.id)), role: m.role, starred: m.starred, lastOpenedAt: m.lastOpenedAt });
+        rows.push({ ...withDefaults(b), updatedAt: latest(b.updatedAt, docTimes.get(b.id)), role: m.role, starred: m.starred, lastOpenedAt: m.lastOpenedAt });
       }
       const sort = opts.sort ?? "opened";
       rows.sort((a, b) =>
@@ -212,16 +230,22 @@ export const localData: DataLayer = {
         name: (name ?? "").trim().slice(0, 60) || "Untitled",
         description: "",
         linkAccess: "private",
+        guestView: false,
         createdAt: ts,
         updatedAt: ts,
         deletedAt: null,
       };
       db.boards.push(board);
       db.boardMembers.push({ boardId: board.id, userId, role: "owner", starred: false, lastOpenedAt: ts });
+      secretOf(db, board.id);
       return board;
     }),
 
-  getBoard: (boardId) => tx((db) => db.boards.find((b) => b.id === boardId) ?? null, false),
+  getBoard: (boardId) =>
+    tx((db) => {
+      const b = db.boards.find((x) => x.id === boardId);
+      return b ? withDefaults(b) : null;
+    }, false),
 
   getRole: (boardId, userId) =>
     tx((db) => {
@@ -238,7 +262,7 @@ export const localData: DataLayer = {
       if (!clean) throw new Error("Board name cannot be empty");
       b.name = clean;
       b.updatedAt = now();
-      return b;
+      return withDefaults(b);
     }),
 
   setStarred: (userId, boardId, starred) =>
@@ -288,6 +312,7 @@ export const localData: DataLayer = {
         name: name.trim().slice(0, 60) || src.name,
         description: src.description,
         linkAccess: "private",
+        guestView: false,
         createdAt: ts,
         updatedAt: ts,
         deletedAt: null,
@@ -396,18 +421,55 @@ export const localData: DataLayer = {
       b.updatedAt = now();
     }),
 
-  joinViaLink: (userId, boardId, opts = {}) =>
+  setGuestView: (userId, boardId, on) =>
+    tx((db) => {
+      const b = requireManager(db, boardId, userId);
+      b.guestView = on;
+      b.updatedAt = now();
+    }),
+
+  getLinkSecret: (userId, boardId) =>
+    tx((db) => {
+      if (!liveRole(db, boardId, userId)) throw new AccessError();
+      return secretOf(db, boardId);
+    }),
+
+  resetLinkSecret: (userId, boardId) =>
+    tx((db) => {
+      requireManager(db, boardId, userId);
+      db.linkSecrets ??= {};
+      return (db.linkSecrets[boardId] = newSecret());
+    }),
+
+  joinViaLink: (userId, boardId, opts) =>
     tx((db) => {
       const b = db.boards.find((x) => x.id === boardId && !x.deletedAt);
       if (!b) return null;
       const current = roleOf(db, boardId, userId);
       if (current) return current;
+      if (!secretMatches(db, boardId, opts.secret)) return null;
       let via = linkRole(b.linkAccess);
       if (!via) return null;
       if (via === "editor" && opts.maxRole) via = opts.maxRole;
       db.boardMembers.push({ boardId, userId, role: via, starred: false, lastOpenedAt: null });
       return via;
     }),
+
+  guestBoard: (boardId, secret) =>
+    tx((db) => {
+      const b = db.boards.find((x) => x.id === boardId && !x.deletedAt);
+      if (!b || !b.guestView || b.linkAccess === "private" || !secretMatches(db, boardId, secret)) return null;
+      return { id: b.id, name: b.name };
+    }, false),
+
+  getGuestAsset: (assetId, secret) =>
+    tx((db) => {
+      const a = (db.assets ?? []).find((x) => x.id === assetId);
+      if (!a) return null;
+      const b = db.boards.find((x) => x.id === a.boardId && !x.deletedAt);
+      if (!b || !b.guestView || b.linkAccess === "private" || !secretMatches(db, b.id, secret)) return null;
+      return a;
+    }, false),
 
   listThreads: (userId, boardId) =>
     tx((db) => {

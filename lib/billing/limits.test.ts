@@ -107,11 +107,12 @@ for (const [name, load] of layers) {
     const guest2 = await data.upsertUserByEmail(`ln-g2-${uniq()}@example.com`, "Гость 2");
     const board = await data.createBoard(owner.id, "По ссылке");
     await data.setLinkAccess(owner.id, board.id, "edit");
-    assert.equal(await data.joinViaLink(guest.id, board.id, { maxRole: "commenter" }), "commenter");
+    const secret = await data.getLinkSecret(owner.id, board.id);
+    assert.equal(await data.joinViaLink(guest.id, board.id, { secret, maxRole: "commenter" }), "commenter");
     assert.equal(await data.getRole(board.id, guest.id), "commenter");
-    assert.equal(await data.joinViaLink(guest2.id, board.id), "editor");
+    assert.equal(await data.joinViaLink(guest2.id, board.id, { secret }), "editor");
     await data.setLinkAccess(owner.id, board.id, "view");
     const guest3 = await data.upsertUserByEmail(`ln-g3-${uniq()}@example.com`, "Гость 3");
-    assert.equal(await data.joinViaLink(guest3.id, board.id, { maxRole: "commenter" }), "viewer", "the cap never raises a role");
+    assert.equal(await data.joinViaLink(guest3.id, board.id, { secret, maxRole: "commenter" }), "viewer", "the cap never raises a role");
   });
 }
