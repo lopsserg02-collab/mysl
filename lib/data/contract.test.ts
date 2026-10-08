@@ -93,13 +93,137 @@ for (const [name, load] of layers) {
     await data.cancelInvite(owner.id, board.id, nobody);
     assert.ok(!(await data.listPeople(owner.id, board.id)).some((p) => p.email === nobody));
 
-    // Link access: off by default, then anyone signed in joins with the link's role.
-    assert.equal(await data.joinViaLink(stranger.id, board.id), null);
+    // Link access: off by default, then anyone signed in with the link (id and secret) joins with the link's role.
+    await assert.rejects(data.getLinkSecret(stranger.id, board.id), "only people on the board read the secret");
+    const secret = await data.getLinkSecret(owner.id, board.id);
+    assert.match(secret, /^[0-9a-f]{32}$/);
+    assert.equal(await data.getLinkSecret(newcomer.id, board.id), secret, "anyone on the board can copy the link");
+    assert.equal(await data.joinViaLink(stranger.id, board.id, { secret }), null);
     await data.setLinkAccess(owner.id, board.id, "comment");
-    assert.equal(await data.joinViaLink(stranger.id, board.id), "commenter");
+    // The board id alone, or a wrong secret, is never enough.
+    assert.equal(await data.joinViaLink(stranger.id, board.id, { secret: "" }), null);
+    assert.equal(await data.joinViaLink(stranger.id, board.id, { secret: "0".repeat(32) }), null);
+    assert.equal(await data.joinViaLink(stranger.id, board.id, { secret: secret.toUpperCase() }), null);
+    assert.equal(await data.getRole(board.id, stranger.id), null);
+    assert.equal(await data.joinViaLink(stranger.id, board.id, { secret }), "commenter");
     assert.equal(await data.getRole(board.id, stranger.id), "commenter");
-    assert.equal(await data.joinViaLink(owner.id, board.id), "owner");
+    assert.equal(await data.joinViaLink(owner.id, board.id, { secret: "" }), "owner");
     assert.ok((await data.listBoards(stranger.id)).some((b) => b.id === board.id));
+
+    // A new secret stops the old link; only owners and co-owners make one.
+    await assert.rejects(data.resetLinkSecret(stranger.id, board.id));
+    const fresh = await data.resetLinkSecret(owner.id, board.id);
+    assert.notEqual(fresh, secret);
+    const late = await data.upsertUserByEmail(`late-${uniq()}@example.com`, "Поздний");
+    assert.equal(await data.joinViaLink(late.id, board.id, { secret }), null);
+    assert.equal(await data.joinViaLink(late.id, board.id, { secret: fresh }), "commenter");
+  });
+}
+
+for (const [name, load] of layers) {
+  test(`${name}: guests (not signed in) view by link only with the secret, and get nothing else`, async () => {
+    const data = await load();
+    const owner = await data.upsertUserByEmail(`go-${uniq()}@example.com`, "Гоша");
+    const board = await data.createBoard(owner.id, "Публичная");
+    const other = await data.createBoard(owner.id, "Другая");
+    const secret = await data.getLinkSecret(owner.id, board.id);
+    const otherSecret = await data.getLinkSecret(owner.id, other.id);
+    const meta = { boardId: board.id, storagePath: `${board.id}/g.png`, mime: "image/png" as const, bytes: 10, width: 4, height: 3 };
+    const img = await data.createAsset(owner.id, meta);
+    const otherImg = await data.createAsset(owner.id, { ...meta, boardId: other.id, storagePath: `${other.id}/g.png` });
+
+    // Off by default, and the guest switch alone does nothing while the link itself is private.
+    assert.equal((await data.getBoard(board.id))?.guestView, false);
+    assert.equal(await data.guestBoard(board.id, secret), null);
+    await data.setGuestView(owner.id, board.id, true);
+    assert.equal(await data.guestBoard(board.id, secret), null);
+    assert.equal(await data.getGuestAsset(img.id, secret), null);
+
+    const viewer = await data.upsertUserByEmail(`gv-${uniq()}@example.com`, "Вика");
+    await data.shareBoard(owner.id, board.id, viewer.email, "viewer");
+    await assert.rejects(data.setGuestView(viewer.id, board.id, false), "only owners and co-owners switch guests");
+
+    await data.setLinkAccess(owner.id, board.id, "view");
+    assert.deepEqual(await data.guestBoard(board.id, secret), { id: board.id, name: "Публичная" });
+    assert.equal((await data.getBoard(board.id))?.guestView, true);
+
+    // Without the secret, with a wrong one, or with another board's: nothing.
+    for (const bad of ["", "x", "0".repeat(32), secret.slice(0, 31), `${secret}0`, secret.toUpperCase(), otherSecret, `' or '1'='1`]) {
+      assert.equal(await data.guestBoard(board.id, bad), null, `guestBoard with ${JSON.stringify(bad)}`);
+      assert.equal(await data.getGuestAsset(img.id, bad), null, `getGuestAsset with ${JSON.stringify(bad)}`);
+    }
+    assert.equal(await data.guestBoard(other.id, secret), null, "a secret opens only its own board");
+
+    // Images: only the ones on the board whose secret the guest holds.
+    assert.equal((await data.getGuestAsset(img.id, secret))?.storagePath, meta.storagePath);
+    assert.equal(await data.getGuestAsset(otherImg.id, secret), null);
+    assert.equal(await data.getGuestAsset(otherImg.id, otherSecret), null, "the other board has no guest link");
+
+    // A new secret, guests off, link closed, or the board in the trash: the old link stops at once.
+    const fresh = await data.resetLinkSecret(owner.id, board.id);
+    assert.equal(await data.guestBoard(board.id, secret), null);
+    assert.equal(await data.getGuestAsset(img.id, secret), null);
+    assert.ok(await data.guestBoard(board.id, fresh));
+    await data.setGuestView(owner.id, board.id, false);
+    assert.equal(await data.guestBoard(board.id, fresh), null);
+    await data.setGuestView(owner.id, board.id, true);
+    await data.setLinkAccess(owner.id, board.id, "private");
+    assert.equal(await data.guestBoard(board.id, fresh), null);
+    await data.setLinkAccess(owner.id, board.id, "edit");
+    assert.ok(await data.guestBoard(board.id, fresh));
+    await data.trashBoard(owner.id, board.id);
+    assert.equal(await data.guestBoard(board.id, fresh), null);
+    assert.equal(await data.getGuestAsset(img.id, fresh), null);
+  });
+}
+
+if (process.env.TEST_DATABASE_URL) {
+  test("postgres: the anon role (guests) reads no table and writes nothing, even on a guest-link board", async () => {
+    const data = (await import("./postgres")).postgresData;
+    const owner = await data.upsertUserByEmail(`an-${uniq()}@example.com`, "Аня");
+    const board = await data.createBoard(owner.id, "Открытая");
+    await data.setLinkAccess(owner.id, board.id, "comment");
+    await data.setGuestView(owner.id, board.id, true);
+    const secret = await data.getLinkSecret(owner.id, board.id);
+    await data.createAsset(owner.id, { boardId: board.id, storagePath: `${board.id}/a.png`, mime: "image/png", bytes: 1, width: 1, height: 1 });
+    await data.createThread(owner.id, board.id, { x: 0, y: 0 }, "Привет");
+
+    const asAnon = <T>(fn: (tx: postgres.TransactionSql) => Promise<T>) =>
+      raw().begin(async (tx) => {
+        await tx`select set_config('request.jwt.claims', ${JSON.stringify({ role: "anon" })}, true)`;
+        await tx.unsafe("set local role anon");
+        return fn(tx);
+      }) as Promise<T>;
+    const nothing = async (q: (tx: postgres.TransactionSql) => PromiseLike<readonly unknown[]>) => {
+      // Either no rows (row level security) or no privilege at all: both mean nothing leaks.
+      const rows: readonly unknown[] = await asAnon(async (tx) => await q(tx)).catch(() => []);
+      assert.equal(rows.length, 0);
+    };
+    await nothing((tx) => tx`select * from boards where id = ${board.id}`);
+    await nothing((tx) => tx`select link_token from boards`);
+    await nothing((tx) => tx`select * from board_members where board_id = ${board.id}`);
+    await nothing((tx) => tx`select * from profiles`);
+    await nothing((tx) => tx`select * from board_docs`);
+    await nothing((tx) => tx`select * from assets`);
+    await nothing((tx) => tx`select * from comment_threads`);
+    await nothing((tx) => tx`select * from comments`);
+    await nothing((tx) => tx`select * from board_invites`);
+    // The people list and comments need a signed-in caller on the board.
+    await assert.rejects(asAnon((tx) => tx`select * from board_people(${board.id})`));
+    await assert.rejects(asAnon((tx) => tx`select * from board_comments(${board.id})`));
+    // Guests cannot comment, join, or change anything, secret or not.
+    await assert.rejects(asAnon((tx) => tx`insert into comment_threads (board_id, x, y, created_by) values (${board.id}, 0, 0, ${owner.id})`));
+    await assert.rejects(asAnon((tx) => tx`select join_board_via_link(${board.id}, ${secret}, null::text)`));
+    const upd = await asAnon((tx) => tx`update boards set name = 'взлом' where id = ${board.id}`).catch(() => ({ count: 0 }));
+    assert.equal(upd.count, 0);
+    // The old forms that took the board id alone are gone.
+    await assert.rejects(raw()`select join_board_via_link(${board.id}::uuid)`);
+    await assert.rejects(raw()`select join_board_via_link(${board.id}::uuid, null::text)`);
+    // What a guest may call: the board's id and name for the right secret, nothing for any other.
+    assert.deepEqual([...(await asAnon((tx) => tx`select * from guest_board(${board.id}, ${secret})`))], [{ id: board.id, name: "Открытая" }]);
+    assert.equal((await asAnon((tx) => tx`select * from guest_board(${board.id}, ${"0".repeat(32)})`)).length, 0);
+    assert.equal((await asAnon((tx) => tx`select * from guest_board(${board.id}, null)`)).length, 0);
+    assert.equal((await data.getBoard(board.id))?.name, "Открытая");
   });
 }
 

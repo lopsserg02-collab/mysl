@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { siteUrl } from "@/lib/site";
 import { t } from "@/lib/copy";
+import { OfflineSupport } from "@/components/OfflineSupport";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -21,7 +22,10 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="ru">
-      <body className="bg-bg text-text antialiased">{children}</body>
+      <body className="bg-bg text-text antialiased">
+        {children}
+        <OfflineSupport />
+      </body>
     </html>
   );
 }

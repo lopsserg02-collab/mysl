@@ -6,25 +6,33 @@ import type Konva from "konva";
 import {
   ArrowLeft, Hand, MousePointer2, StickyNote, Type, Square, Circle, Triangle, Diamond, RectangleHorizontal, MoveUpRight, Pen, Highlighter, Eraser, Frame,
   Undo2, Redo2, ZoomIn, ZoomOut, Maximize, Copy, Trash2, BringToFront, SendToBack, WifiOff, Lock, Unlock, CornerDownRight, ArrowRight, Share2, MessageCircle, ImagePlus, Download,
-  Bold, Italic, Underline, Slash, Spline, Lasso, Group as GroupIcon, Ungroup, PanelRight,
+  Bold, Italic, Underline, Slash, Spline, Lasso, Group as GroupIcon, Ungroup, PanelRight, Eye, LogIn, Keyboard,
 } from "lucide-react";
 import { canComment, type BoardRole, type LinkAccess } from "@/lib/data/types";
 import { t } from "@/lib/copy";
 import { formatBytes } from "@/lib/plans";
 import {
-  addItem, addSticky, boxOf, bringToFront, deleteItems, duplicateItems, fitImage, hasText, itemsInside, itemsMap, sendToBack, simplify, updateItems, bboxOfPoints,
-  groupItems, ungroupItems, withGroups, nextStyle, lassoHits,
+  addItem, addSticky, boxOf, setMeta, bringToFront, deleteItems, duplicateItems, fitImage, hasText, itemsInside, itemsMap, sendToBack, simplify, updateItems, bboxOfPoints,
+  groupItems, ungroupItems, withGroups, nextStyle, lassoHits, frameOrder, moveFrame,
   type Box, type ConnectorItem, type DrawingItem, type End, type FrameItem, type ImageItem, type Item, type Patch, type Route, type ShapeItem, type ShapeKind, type TextItem, type TextStyle,
 } from "@/lib/board/model";
+import { hitTest } from "@/lib/board/hit";
 import { CLIP_MIME, copyPayload, parsePayload, pasteItems, plainText } from "@/lib/board/clipboard";
-import { CANVAS, DEFAULT_INK, INK, STICKY_COLOR_NAMES, ZOOM, stickyPair } from "@/lib/board/palette";
+import { CANVAS, DEFAULT_INK, INK, STICKY_COLOR_NAMES, ZOOM, boardLook, inkOn, stickyPair, type BoardLook, type GridStyle } from "@/lib/board/palette";
+import { INITIAL_SIZES, clampSize, parseSizes, stepSize, strokeHits, type BrushTool } from "@/lib/board/brush";
 import { seedGrid } from "@/lib/board/bench";
 import { renameBoard } from "@/app/actions";
 import { useBoardDoc } from "./useBoardDoc";
 import { bounds, fitTo, intersects, stepZoom, toBoard, zoomAt, type Viewport } from "./viewport";
-import { ItemView, preloadImages, type Detail } from "./ItemView";
+import { ItemView, preloadImages, setGuestAssetSecret, type Detail } from "./ItemView";
+import { BulkItems } from "./BulkItems";
 import { FramesPanel } from "./FramesPanel";
 import { ExportDialog } from "./ExportDialog";
+import { ShortcutsDialog } from "./ShortcutsDialog";
+import { Cursors } from "./Cursors";
+import { Toolbar, settingsPlace, useLocalPref, useToolbarPrefs, type ToolDef } from "./Toolbar";
+import { BoardLookMenu, gridBackground } from "./BoardLookMenu";
+import { BrushSize } from "./BrushSize";
 import { download, fileName, renderRegion, toPdfBlob, toPngBlob, type ExportFormat, type ExportScope } from "./exportBoard";
 import { ShareDialog } from "./ShareDialog";
 import { Comments, type CommentDraft } from "./Comments";
@@ -43,6 +51,8 @@ const LOW_DETAIL_BELOW = 0.3;
 const CULL_MARGIN = 200;
 // More items than this on screen: while the view moves, draw them from one bitmap (see pauseHits).
 const BITMAP_ABOVE = 3000;
+// Faces shown in the people bar; the rest are counted.
+const MAX_AVATARS = 4;
 
 type Drag =
   | { kind: "pan"; start: Pt; vp: Viewport }
@@ -56,23 +66,48 @@ type Drag =
 
 const rectFrom = (a: Pt, b: Pt): Box => ({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) });
 
-export function Board({ board, role, user, unread }: { board: { id: string; name: string; linkAccess: LinkAccess }; role: BoardRole; user: { id: string; name: string }; unread?: number }) {
+export interface GuestAccess {
+  /** The board's link secret from the address the guest opened. */
+  secret: string;
+  /** Sign in, then come back to this board. */
+  signIn: string;
+}
+
+export function Board({ board, role, user, unread, guest }: { board: { id: string; name: string; linkAccess: LinkAccess; guestView: boolean }; role: BoardRole; user: { id: string; name: string }; unread?: number; guest?: GuestAccess }) {
+  // Guests prove access to each image with the link secret. Set before any image renders.
+  setGuestAssetSecret(guest?.secret ?? null);
   const [shareOpen, setShareOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [exporting, setExporting] = useState(false); // draws every item, not just what is on screen, and hides selection
   const [commentDraft, setCommentDraft] = useState<CommentDraft | null>(null);
-  const mayComment = canComment(role);
-  const canEdit = role === "owner" || role === "coowner" || role === "editor";
-  const canRename = role === "owner" || role === "coowner";
-  const { doc, provider, items, status, peers, undo, ready } = useBoardDoc(board.id, user);
+  // Guests only ever view; the server enforces it too (read-only realtime token, no session for actions).
+  const mayComment = !guest && canComment(role);
+  const canEdit = !guest && (role === "owner" || role === "coowner" || role === "editor");
+  const canRename = !guest && (role === "owner" || role === "coowner");
+  const { doc, provider, items, meta, status, peers, cursors, undo, ready } = useBoardDoc(board.id, user, guest?.secret);
+  // Background and grid everyone on the board sees; the default ink and frames follow the background.
+  const look = useMemo(() => boardLook(meta.bg), [meta.bg]);
+  const gridStyle: GridStyle = meta.grid === "lines" || meta.grid === "none" ? meta.grid : "dots";
+  const changeLook = (patch: { bg?: string; grid?: GridStyle }) => {
+    if (!canEdit) return;
+    undo.stopCapturing(); // each change is its own undo step
+    setMeta(doc, patch);
+    undo.stopCapturing();
+  };
+  // Per person, in this browser: brush sizes and where the toolbar sits.
+  const [sizes, setSizes] = useLocalPref("mysl.brush", INITIAL_SIZES, parseSizes);
+  const setBrushSize = (which: BrushTool, v: number) => setSizes({ ...sizes, [which]: clampSize(which, v) });
+  const [bar, setBar] = useToolbarPrefs();
 
   // Hook for the performance benchmark (e2e/perf.spec.ts) to seed a big board: development only, or a
   // production build made with NEXT_PUBLIC_PERF_HOOK=1 to measure without development-mode React.
   useEffect(() => {
     if ((process.env.NODE_ENV === "production" && process.env.NEXT_PUBLIC_PERF_HOOK !== "1") || !canEdit) return;
-    const w = window as unknown as { __mysl?: { seed: (n: number) => number; touch: () => void } };
+    const w = window as unknown as { __mysl?: { seed: (n: number) => number; touch: () => void; onScreen: () => number } };
     w.__mysl = {
       seed: (n) => seedGrid(doc, n, user.id).length,
+      onScreen: () => motion.current.count,
       // Moves one random sticky by a pixel, like a collaborator's edit arriving.
       touch: () => {
         const ids = [...itemsMap(doc).keys()];
@@ -85,6 +120,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   }, [doc, user.id, canEdit]);
 
   const wrapRef = useRef<HTMLDivElement>(null);
+  const wrapRect = useRef({ left: 0, top: 0 });
   const stageRef = useRef<Konva.Stage>(null);
   const trRef = useRef<Konva.Transformer>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -111,6 +147,8 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   const cursorFrame = useRef(0);
 
   const byId = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const frames = useMemo(() => items.filter((i): i is FrameItem => i.type === "frame"), [items]);
   const lookup = useCallback((id: string) => {
     const i = byId.get(id);
     return i ? boxOf(i) : undefined;
@@ -128,9 +166,23 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setSize({ w: el.clientWidth, h: el.clientHeight }));
+    // Where the board sits in the window, read on resize instead of on every pointer and wheel event
+    // (reading it then forces the browser to lay the page out mid-frame).
+    const place = () => {
+      wrapRect.current = el.getBoundingClientRect();
+    };
+    const ro = new ResizeObserver(() => {
+      place();
+      setSize({ w: el.clientWidth, h: el.clientHeight });
+    });
     ro.observe(el);
-    return () => ro.disconnect();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
   }, []);
 
   useEffect(() => {
@@ -354,13 +406,26 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
         if (box) setVp(fitTo(box, size));
         return;
       }
-      const tools: Record<string, Tool> = { v: "select", o: "lasso", h: "hand", n: "sticky", t: "text", s: "shape", l: "connector", p: "pen", e: "eraser" };
+      if (e.key === "?") {
+        e.preventDefault();
+        return setHelpOpen(true);
+      }
+      if (e.altKey) return; // Alt+letter belongs to the browser and the operating system
+      if (e.key === "[" || e.key === "]") {
+        e.preventDefault();
+        return stepBrush(e.key === "]" ? 1 : -1);
+      }
+      const tools: Record<string, Tool> = { v: "select", o: "lasso", h: "hand", n: "sticky", t: "text", s: "shape", l: "connector", p: "pen", m: "highlighter", e: "eraser" };
       if (tools[k]) {
         if (canEdit || tools[k] === "select" || tools[k] === "hand" || tools[k] === "lasso") setTool(tools[k]);
         return;
       }
       if (k === "c") {
         if (mayComment) setTool("comment");
+        return;
+      }
+      if (k === "i") {
+        if (canEdit) fileInput.current?.click();
         return;
       }
       switch (e.key) {
@@ -415,16 +480,40 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
     }
     return null;
   };
+  /**
+   * The item at screen point `p`: from the canvas node that was hit, or, far out where items are drawn in bulk
+   * without nodes of their own, by geometry. `title` is set when a frame was hit on its title.
+   */
+  const pickAt = (target: Konva.Node | null, p: Pt): { id: string | null; title: boolean } => {
+    const id = itemAt(target);
+    if (id) return { id, title: !!target?.getAttr("frameTitle") };
+    if (detail !== "low") return { id: null, title: false };
+    return hitTest(visible, toBoard(vp, p), vp.scale, lookup);
+  };
   /** The item under the pointer that a connector may attach to. */
   const attachableAt = (p: Pt): string | null => {
-    const id = itemAt(stageRef.current?.getIntersection(p) ?? null);
+    const id = pickAt(stageRef.current?.getIntersection(p) ?? null, p).id;
     const i = id ? byId.get(id) : undefined;
     return i && i.type !== "connector" && i.type !== "drawing" ? id : null;
   };
 
+  /** Erases every stroke the eraser's circle touches (its size is in screen pixels). */
   const eraseAt = (p: Pt) => {
-    const id = itemAt(stageRef.current?.getIntersection(p) ?? null);
-    if (id && byId.get(id)?.type === "drawing" && editable(id)) deleteItems(doc, [id]);
+    const c = toBoard(vp, p);
+    const r = sizes.eraser / 2 / vp.scale;
+    const hits = visible.filter(
+      (i): i is DrawingItem =>
+        i.type === "drawing" && c.x >= i.x - r - i.width && c.x <= i.x + i.w + r + i.width && c.y >= i.y - r - i.width && c.y <= i.y + i.h + r + i.width && editable(i.id) && strokeHits(i, c, r),
+    );
+    if (hits.length) deleteItems(doc, hits.map((i) => i.id));
+  };
+  /** [ and ]: the current brush, or the selected drawings, one preset thinner or thicker. */
+  const stepBrush = (dir: 1 | -1) => {
+    if (tool === "pen" || tool === "highlighter" || tool === "eraser") return setBrushSize(tool, stepSize(tool, sizes[tool], dir));
+    const drawings = selected.map((id) => byId.get(id)).filter((i): i is DrawingItem => i?.type === "drawing" && editable(i.id));
+    if (drawings.length === 0 || drawings.length !== selected.length) return;
+    undo.stopCapturing();
+    updateItems(doc, drawings.map((i) => ({ id: i.id, patch: { width: stepSize(i.highlighter ? "highlighter" : "pen", i.width, dir) } })));
   };
 
   const startMarquee = (b: Pt, additive: boolean) => {
@@ -466,7 +555,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
     }
     if (tool === "comment") {
       // A pin on an item sticks to it; elsewhere it stays where it was dropped.
-      const id = itemAt(e.target);
+      const id = pickAt(e.target, p).id;
       const on = id ? byId.get(id) : undefined;
       pendingComment.current = on && on.type !== "connector" ? { x: b.x - on.x, y: b.y - on.y, itemId: on.id } : { x: b.x, y: b.y, itemId: null };
       setTool("select");
@@ -495,11 +584,12 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
           return setDrag({ kind: "erase" });
       }
     }
-    const id = itemAt(e.target);
+    const picked = pickAt(e.target, p);
+    const id = picked.id;
     if (id) {
       // A frame is picked by its title; its empty inside works like empty canvas.
       const hit = byId.get(id);
-      if (hit?.type === "frame" && !(e.target as Konva.Node).getAttr("frameTitle") && !selected.includes(id)) {
+      if (hit?.type === "frame" && !picked.title && !selected.includes(id)) {
         startMarquee(b, e.evt.shiftKey);
         return;
       }
@@ -516,7 +606,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   };
 
   const shareCursor = (e: React.PointerEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
+    const rect = wrapRect.current;
     pointerIn.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     const b = toBoard(vp, { x: e.clientX - rect.left, y: e.clientY - rect.top });
     cancelAnimationFrame(cursorFrame.current);
@@ -607,7 +697,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
       const highlighter = tool === "highlighter";
       addItem<DrawingItem>(
         doc,
-        { type: "drawing", x: box.x, y: box.y, w: Math.max(1, box.w), h: Math.max(1, box.h), points: pts.map((v, k) => (k % 2 ? v - box.y : v - box.x)), stroke: ink, width: highlighter ? 16 : 3, highlighter },
+        { type: "drawing", x: box.x, y: box.y, w: Math.max(1, box.w), h: Math.max(1, box.h), points: pts.map((v, k) => (k % 2 ? v - box.y : v - box.x)), stroke: ink, width: sizes[highlighter ? "highlighter" : "pen"], highlighter },
         user.id,
       );
       undo.stopCapturing();
@@ -628,6 +718,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   // has been still for a moment, or right away when a pointer goes down.
   // With thousands of items on screen, the items are also drawn once into a bitmap that moves with the view
   // until it settles, instead of drawing every item on every frame.
+  const [frozen, setFrozen] = useState(false);
   const layerRef = useRef<Konva.Layer>(null);
   const itemsRef = useRef<Konva.Group>(null);
   const motion = useRef({ count: 0, scale: 1 }); // what is on screen, for the bitmap decision
@@ -638,6 +729,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
     if (group?.isCached()) {
       group.clearCache();
       group.getLayer()?.batchDraw();
+      setFrozen(false);
     }
     const layer = layerRef.current;
     if (layer && !layer.listening()) {
@@ -652,7 +744,10 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
     if (group && !group.isCached() && count > BITMAP_ABOVE) {
       const r = group.getClientRect({ relativeTo: group });
       const ratio = scale * (window.devicePixelRatio || 1);
-      if (r.width * ratio < 4096 && r.height * ratio < 4096) group.cache({ pixelRatio: ratio });
+      if (r.width * ratio < 4096 && r.height * ratio < 4096) {
+        group.cache({ pixelRatio: ratio });
+        setFrozen(true);
+      }
     }
     clearTimeout(settle.current);
     settle.current = setTimeout(resumeHits, 150);
@@ -664,7 +759,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
     e.preventDefault();
     e.stopPropagation();
     pauseHits();
-    const rect = wrapRef.current!.getBoundingClientRect();
+    const rect = wrapRect.current;
     const p = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     if (e.ctrlKey || e.metaKey) {
       const factor = Math.exp(-e.deltaY * 0.01); // trackpad pinch arrives as ctrl+wheel
@@ -691,9 +786,9 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   const onDblClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
     const { x, y, prev } = lastDown.current;
     if (!canEdit || tool !== "select" || Math.hypot(x - prev.x, y - prev.y) > 6) return;
-    const id = itemAt(e.target);
-    const hit = id ? byId.get(id) : undefined;
-    if (hit && (hit.type !== "frame" || (e.target as Konva.Node).getAttr("frameTitle"))) {
+    const picked = pickAt(e.target, pointer());
+    const hit = picked.id ? byId.get(picked.id) : undefined;
+    if (hit && (hit.type !== "frame" || picked.title)) {
       if (hit.type === "drawing" || !editable(hit.id)) return;
       setSelected([hit.id]);
       setEditing(hit.id);
@@ -751,14 +846,15 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
     const stage = stageRef.current;
     if (!stage) throw new Error("no stage");
     const pick = scope === "selection" ? items.filter((i) => selected.includes(i.id)) : items;
-    const regions = scope === "frames" ? items.filter((i) => i.type === "frame").map(boxOf) : [bounds(pick.map(boxOfAny))].filter((b): b is Box => !!b);
+    const regions = scope === "frames" ? frameOrder(frames).map(boxOf) : [bounds(pick.map(boxOfAny))].filter((b): b is Box => !!b);
     if (regions.length === 0) throw new Error("nothing to export");
     await preloadImages(items.filter((i): i is ImageItem => i.type === "image").map((i) => i.src));
     setExporting(true);
     trRef.current?.visible(false);
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     try {
-      const canvases = regions.map((b) => renderRegion(stage, vp, b, quality, scope === "frames" ? 0 : undefined));
+      // A chosen background is part of the picture; the theme's default canvas exports on white.
+      const canvases = regions.map((b) => renderRegion(stage, vp, b, quality, scope === "frames" ? 0 : undefined, look.custom ? look.bg : undefined));
       const blob = format === "pdf" ? await toPdfBlob(canvases) : await toPngBlob(canvases[0]);
       download(blob, fileName(name || t.board.untitled, format));
     } finally {
@@ -769,16 +865,26 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
 
   // ---------- render ----------
   // Viewport culling: only items in or near the view are drawn (all of them while exporting).
-  const margin = CULL_MARGIN / vp.scale;
-  const view = { x: -vp.x / vp.scale - margin, y: -vp.y / vp.scale - margin, w: size.w / vp.scale + margin * 2, h: size.h / vp.scale + margin * 2 };
-  const culled = exporting ? items : items.filter((i) => intersects(view, i.type === "connector" ? connectorBox(i, lookup) : i));
-  // Same items in view as last render: keep the same array, so a pan that reveals nothing new skips the items layer.
-  const lastVisible = useRef<Item[]>([]);
-  const prevVisible = lastVisible.current;
-  const visible = culled.length === prevVisible.length && culled.every((v, k) => v === prevVisible[k]) ? prevVisible : culled;
-  lastVisible.current = visible;
+  // While the board moves as a bitmap (see pauseHits), the items layer keeps what it drew: nothing is culled,
+  // re-rendered or re-drawn until the view settles.
+  const lastDrawn = useRef<{ visible: Item[]; scale: number; detail: Detail }>({ visible: [], scale: 1, detail: "full" });
+  let visible: Item[];
+  let detail: Detail;
+  let drawScale: number;
+  if (frozen && !exporting) {
+    ({ visible, detail, scale: drawScale } = lastDrawn.current);
+  } else {
+    const margin = CULL_MARGIN / vp.scale;
+    const view = { x: -vp.x / vp.scale - margin, y: -vp.y / vp.scale - margin, w: size.w / vp.scale + margin * 2, h: size.h / vp.scale + margin * 2 };
+    const culled = exporting ? items : items.filter((i) => intersects(view, i.type === "connector" ? connectorBox(i, lookup) : i));
+    // Same items in view as last render: keep the same array, so a pan that reveals nothing new skips the items layer.
+    const prevVisible = lastDrawn.current.visible;
+    visible = culled.length === prevVisible.length && culled.every((v, k) => v === prevVisible[k]) ? prevVisible : culled;
+    detail = vp.scale < LOW_DETAIL_BELOW && !exporting ? "low" : "full";
+    drawScale = vp.scale;
+    if (!exporting) lastDrawn.current = { visible, detail, scale: drawScale };
+  }
   motion.current = { count: visible.length, scale: vp.scale };
-  const detail: Detail = vp.scale < LOW_DETAIL_BELOW && !exporting ? "low" : "full";
   const peerSelections = peers.flatMap((p) => p.selection.map((id) => ({ id, color: p.color.fill })));
   const editingItem = editing ? byId.get(editing) : undefined;
   const selItems = selected.map((id) => byId.get(id)).filter((i): i is Item => Boolean(i));
@@ -791,10 +897,44 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
   const groups = new Set(selItems.map((i) => i.groupId).filter(Boolean));
   const allLocked = selItems.length > 0 && selItems.every((i) => i.locked);
 
+  // The main toolbar's tools; `primary` ones stay in compact mode, the rest move under «Ещё».
+  const pick = (next: Tool) => () => setTool(next);
+  const toolDefs: ToolDef[] = [
+    { id: "select", label: t.board.select, icon: (s) => <MousePointer2 size={s} />, active: tool === "select", onClick: pick("select"), primary: true },
+    { id: "lasso", label: t.board.lasso, icon: (s) => <Lasso size={s} />, active: tool === "lasso", onClick: pick("lasso") },
+    { id: "hand", label: t.board.hand, icon: (s) => <Hand size={s} />, active: tool === "hand", onClick: pick("hand"), primary: true },
+    ...(mayComment ? [{ id: "comment", label: t.comments.tool, icon: (s: number) => <MessageCircle size={s} />, active: tool === "comment", onClick: pick("comment"), primary: !canEdit }] : []),
+    ...(canEdit
+      ? ([
+          { id: "sticky", label: t.board.sticky, icon: (s) => <StickyNote size={s} />, active: tool === "sticky", onClick: pick("sticky"), primary: true },
+          { id: "text", label: t.board.text, icon: (s) => <Type size={s} />, active: tool === "text", onClick: pick("text"), primary: true },
+          { id: "shape", label: t.board.shape, icon: (s) => <ShapeIcon kind={shapeKind} size={s} />, active: tool === "shape", onClick: pick("shape"), primary: true },
+          { id: "connector", label: t.board.connector, icon: (s) => <MoveUpRight size={s} />, active: tool === "connector", onClick: pick("connector"), primary: true },
+          { id: "pen", label: t.board.pen, icon: (s) => <Pen size={s} />, active: tool === "pen", onClick: pick("pen"), primary: true },
+          { id: "highlighter", label: t.board.highlighter, icon: (s) => <Highlighter size={s} />, active: tool === "highlighter", onClick: pick("highlighter") },
+          { id: "eraser", label: t.board.eraser, icon: (s) => <Eraser size={s} />, active: tool === "eraser", onClick: pick("eraser") },
+          { id: "frame", label: t.board.frame, icon: (s) => <Frame size={s} />, active: tool === "frame", onClick: pick("frame") },
+          { id: "image", label: t.images.tool, icon: (s) => <ImagePlus size={s} />, onClick: () => fileInput.current?.click() },
+          { id: "undo", label: t.board.undo, icon: (s) => <Undo2 size={s} />, onClick: () => undo.undo(), divider: true, primary: true },
+          { id: "redo", label: t.board.redo, icon: (s) => <Redo2 size={s} />, onClick: () => undo.redo() },
+        ] satisfies ToolDef[])
+      : []),
+  ];
+  // A toolbar on the right moves aside for the frames panel.
+  const barRight = framesOpen && size.w >= 720 ? "calc(var(--layout-side-panel) + 24px)" : "12px";
+  const settings = settingsPlace(bar.side, bar.compact);
+
   return (
     <div
       className="relative h-full w-full touch-none overflow-hidden bg-canvas-bg"
-      style={{ cursor: cursorStyle }}
+      style={{ cursor: cursorStyle, ...(look.custom ? { background: look.bg } : {}) }}
+      // Focus moving to a control near the edge must not scroll the board's frame.
+      onScroll={(e) => {
+        e.currentTarget.scrollTop = 0;
+        e.currentTarget.scrollLeft = 0;
+      }}
+      data-board-bg={meta.bg ?? "default"}
+      data-grid={gridStyle}
       onPointerMove={shareCursor}
       onPointerLeave={hideCursor}
       data-ready={ready || undefined}
@@ -810,7 +950,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
       }}
     >
       {/* Dot grid: a layer one cell larger than the view, moved by transform so panning does not repaint it. */}
-      {gridStep >= 8 && (
+      {gridStep >= 8 && gridStyle !== "none" && (
         <div
           aria-hidden
           className="pointer-events-none absolute will-change-transform"
@@ -819,8 +959,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
             top: -gridStep,
             width: size.w + gridStep * 2,
             height: size.h + gridStep * 2,
-            backgroundImage: "radial-gradient(var(--color-canvas-grid) 1.2px, transparent 1.2px)",
-            backgroundSize: `${gridStep}px ${gridStep}px`,
+            ...gridBackground(gridStyle, look.custom ? look.grid : "var(--color-canvas-grid)", gridStep),
             transform: `translate3d(${mod(vp.x, gridStep)}px, ${mod(vp.y, gridStep)}px, 0)`,
           }}
         />
@@ -845,7 +984,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
           >
             <Layer ref={layerRef}>
               <Group ref={itemsRef}>
-                <Items visible={visible} byId={byId} editing={editing} scale={vp.scale} detail={detail} onTransformEnd={onTransformEndStable} />
+                <Items visible={visible} byId={byId} editing={editing} scale={drawScale} detail={detail} onTransformEnd={onTransformEndStable} look={look} lifted={selectedSet} />
               </Group>
               {!exporting && peerSelections.map(({ id, color }) => {
                 const i = byId.get(id);
@@ -856,25 +995,25 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
               {!exporting && selItems.filter((i) => i.type === "connector" || i.locked || (selItems.length > 1 && !i.groupId)).map((i) => {
                 const b = i.type === "connector" ? connectorBox(i, lookup) : boxOf(i);
                 const pad = 4 / vp.scale;
-                return <Rect key={`sel-${i.id}`} x={b.x - pad} y={b.y - pad} width={b.w + pad * 2} height={b.h + pad * 2} stroke={CANVAS.selection} strokeWidth={1.5 / vp.scale} dash={i.locked ? [4 / vp.scale, 3 / vp.scale] : undefined} listening={false} />;
+                return <Rect key={`sel-${i.id}`} x={b.x - pad} y={b.y - pad} width={b.w + pad * 2} height={b.h + pad * 2} stroke={look.selection} strokeWidth={1.5 / vp.scale} dash={i.locked ? [4 / vp.scale, 3 / vp.scale] : undefined} listening={false} />;
               })}
               {/* A selected group gets one solid outline around all of its members. */}
               {!exporting && [...new Set(selItems.map((i) => i.groupId).filter((g): g is string => !!g))].map((g) => {
                 const b = bounds(selItems.filter((i) => i.groupId === g).map((i) => (i.type === "connector" ? connectorBox(i, lookup) : boxOf(i))))!;
                 const pad = 8 / vp.scale;
-                return <Rect key={`group-${g}`} x={b.x - pad} y={b.y - pad} width={b.w + pad * 2} height={b.h + pad * 2} stroke={CANVAS.selection} strokeWidth={1.5 / vp.scale} listening={false} />;
+                return <Rect key={`group-${g}`} x={b.x - pad} y={b.y - pad} width={b.w + pad * 2} height={b.h + pad * 2} stroke={look.selection} strokeWidth={1.5 / vp.scale} listening={false} />;
               })}
-              <DragPreview drag={drag} scale={vp.scale} shapeKind={shapeKind} ink={ink} highlighter={tool === "highlighter"} lookup={lookup} />
+              <DragPreview drag={drag} scale={vp.scale} shapeKind={shapeKind} ink={inkOn(look, ink)} highlighter={tool === "highlighter"} width={sizes[tool === "highlighter" ? "highlighter" : "pen"]} look={look} lookup={lookup} />
               <Transformer
                 ref={trRef}
                 rotateEnabled={false}
                 flipEnabled={false}
                 keepRatio={single?.type === "image"}
                 enabledAnchors={single?.type === "text" ? ["middle-left", "middle-right"] : single?.type === "image" ? ["top-left", "top-right", "bottom-left", "bottom-right"] : undefined}
-                borderStroke={CANVAS.selection}
+                borderStroke={look.selection}
                 borderStrokeWidth={1.5}
-                anchorStroke={CANVAS.selection}
-                anchorFill={CANVAS.handle}
+                anchorStroke={look.selection}
+                anchorFill={look.dark ? look.bg : CANVAS.handle}
                 anchorSize={8}
                 ignoreStroke
               />
@@ -887,6 +1026,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
         <TextEditor
           key={editingItem.id}
           item={editingItem}
+          look={look}
           vp={vp}
           onChange={(text) => {
             const patch: Patch = { text };
@@ -928,20 +1068,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
       {/* What the canvas shows, for screen readers (and tests). */}
       <ItemList items={items} />
 
-      <div aria-hidden className="pointer-events-none absolute inset-0">
-        {peers.map((p) =>
-          p.cursor ? (
-            <div
-              key={p.clientId}
-              className="absolute left-0 top-0 transition-transform duration-75 ease-linear"
-              style={{ transform: `translate(${p.cursor.x * vp.scale + vp.x}px, ${p.cursor.y * vp.scale + vp.y}px)` }}
-            >
-              <svg width="18" height="18" viewBox="0 0 18 18"><path d="M1 1l6 15 2.2-6.3L16 7.5z" fill={p.color.fill} stroke="#fff" strokeWidth="1.2" /></svg>
-              <span className="ml-3 rounded-sm px-1.5 py-0.5 text-xs font-medium" style={{ background: p.color.fill, color: p.color.label }}>{p.name}</span>
-            </div>
-          ) : null,
-        )}
-      </div>
+      <Cursors store={cursors} vp={vp} />
 
       <header className="absolute left-3 right-3 top-3 flex items-start justify-between gap-3">
         <div className="flex h-12 min-w-0 items-center gap-1 rounded-md bg-bg px-2 shadow-toolbar">
@@ -974,10 +1101,21 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
         </div>
         <div className="flex h-12 items-center gap-1 rounded-md bg-bg px-2 shadow-toolbar" aria-label="Участники">
           <Avatar name={user.name} color="var(--color-accent)" label={`${user.name} (${t.board.you})`} />
-          {peers.map((p) => (
+          {/* A few faces, then a count: fifty people must not push the bar off the screen. */}
+          {peers.slice(0, MAX_AVATARS).map((p) => (
             <Avatar key={p.clientId} name={p.name} color={p.color.fill} label={p.name} />
           ))}
-          <NotificationBell initialUnread={unread} />
+          {peers.length > MAX_AVATARS && (
+            <span
+              role="img"
+              aria-label={t.board.morePeople(peers.length - MAX_AVATARS)}
+              title={peers.slice(MAX_AVATARS).map((p) => p.name).join(", ")}
+              className="flex h-8 min-w-8 items-center justify-center rounded-full bg-surface px-1 text-xs font-semibold tabular-nums"
+            >
+              +{peers.length - MAX_AVATARS}
+            </span>
+          )}
+          {!guest && <NotificationBell initialUnread={unread} />}
           <button
             type="button"
             onClick={() => setExportOpen(true)}
@@ -987,16 +1125,30 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
           >
             <Download size={18} aria-hidden />
           </button>
-          <button
-            type="button"
-            onClick={() => setShareOpen(true)}
-            className="ml-1 flex h-9 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-on-accent hover:bg-accent-hover"
-          >
-            <Share2 size={16} aria-hidden /> <span className="hidden sm:inline">{t.share.open}</span>
-            <span className="sr-only sm:hidden">{t.share.open}</span>
-          </button>
+          <BoardLookMenu bg={meta.bg ?? "default"} grid={gridStyle} canEdit={canEdit} onChange={changeLook} />
+          {guest ? (
+            <Link href={guest.signIn} className="ml-1 flex h-9 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-on-accent hover:bg-accent-hover">
+              <LogIn size={16} aria-hidden /> {t.guest.signIn}
+            </Link>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setShareOpen(true)}
+              className="ml-1 flex h-9 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-on-accent hover:bg-accent-hover"
+            >
+              <Share2 size={16} aria-hidden /> <span className="hidden sm:inline">{t.share.open}</span>
+              <span className="sr-only sm:hidden">{t.share.open}</span>
+            </button>
+          )}
         </div>
       </header>
+      {guest && (
+        <div role="note" className="absolute left-1/2 top-[72px] flex max-w-[calc(100%-32px)] -translate-x-1/2 items-center gap-3 rounded-md bg-bg px-3 py-2 text-sm shadow-pop">
+          <Eye size={16} aria-hidden className="shrink-0 text-text-muted" />
+          <span>{t.guest.banner}</span>
+          <Link href={guest.signIn} className="shrink-0 font-semibold text-accent underline underline-offset-2">{t.guest.signIn}</Link>
+        </div>
+      )}
       <input
         ref={fileInput}
         type="file"
@@ -1021,7 +1173,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
           )}
         </div>
       )}
-      <Comments
+      {!guest && <Comments
         boardId={board.id}
         userId={user.id}
         canComment={mayComment}
@@ -1031,48 +1183,33 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
         provider={provider}
         draft={commentDraft}
         onDraftDone={() => setCommentDraft(null)}
-      />
+      />}
       <ExportDialog
         open={exportOpen}
         onClose={() => setExportOpen(false)}
         hasSelection={selected.length > 0}
-        frameCount={items.filter((i) => i.type === "frame").length}
+        frameCount={frames.length}
         empty={items.length === 0}
         onExport={runExport}
       />
-      <ShareDialog boardId={board.id} role={role} userId={user.id} linkAccess={board.linkAccess} open={shareOpen} onClose={() => setShareOpen(false)} />
+      {!guest && <ShareDialog boardId={board.id} role={role} userId={user.id} linkAccess={board.linkAccess} guestView={board.guestView} open={shareOpen} onClose={() => setShareOpen(false)} />}
 
-      <nav aria-label="Инструменты" className="absolute left-3 top-1/2 flex max-h-[calc(100%-140px)] -translate-y-1/2 flex-col gap-1 overflow-y-auto rounded-md bg-bg p-1 shadow-toolbar">
-        <ToolButton label={t.board.select} active={tool === "select"} onClick={() => setTool("select")}><MousePointer2 size={20} /></ToolButton>
-        <ToolButton label={t.board.lasso} active={tool === "lasso"} onClick={() => setTool("lasso")}><Lasso size={20} /></ToolButton>
-        <ToolButton label={t.board.hand} active={tool === "hand"} onClick={() => setTool("hand")}><Hand size={20} /></ToolButton>
-        {mayComment && <ToolButton label={t.comments.tool} active={tool === "comment"} onClick={() => setTool("comment")}><MessageCircle size={20} /></ToolButton>}
-        {canEdit && (
-          <>
-            <ToolButton label={t.board.sticky} active={tool === "sticky"} onClick={() => setTool("sticky")}><StickyNote size={20} /></ToolButton>
-            <ToolButton label={t.board.text} active={tool === "text"} onClick={() => setTool("text")}><Type size={20} /></ToolButton>
-            <ToolButton label={t.board.shape} active={tool === "shape"} onClick={() => setTool("shape")}><ShapeIcon kind={shapeKind} size={20} /></ToolButton>
-            <ToolButton label={t.board.connector} active={tool === "connector"} onClick={() => setTool("connector")}><MoveUpRight size={20} /></ToolButton>
-            <ToolButton label={t.board.pen} active={tool === "pen"} onClick={() => setTool("pen")}><Pen size={20} /></ToolButton>
-            <ToolButton label={t.board.highlighter} active={tool === "highlighter"} onClick={() => setTool("highlighter")}><Highlighter size={20} /></ToolButton>
-            <ToolButton label={t.board.eraser} active={tool === "eraser"} onClick={() => setTool("eraser")}><Eraser size={20} /></ToolButton>
-            <ToolButton label={t.board.frame} active={tool === "frame"} onClick={() => setTool("frame")}><Frame size={20} /></ToolButton>
-            <ToolButton label={t.images.add} onClick={() => fileInput.current?.click()}><ImagePlus size={20} /></ToolButton>
-            <div className="my-1 h-px shrink-0 bg-border" />
-            <ToolButton label={t.board.undo} onClick={() => undo.undo()}><Undo2 size={20} /></ToolButton>
-            <ToolButton label={t.board.redo} onClick={() => undo.redo()}><Redo2 size={20} /></ToolButton>
-          </>
-        )}
-      </nav>
+      <Toolbar prefs={bar} setPrefs={setBar} tools={toolDefs} rightOffset={barRight} />
 
-      {canEdit && (tool === "shape" || drawingTool || tool === "connector" || tool === "text") && (
-        <div role="toolbar" aria-label="Настройки инструмента" className="absolute left-[68px] top-1/2 flex -translate-y-1/2 flex-col items-center gap-1 rounded-md bg-bg p-1 shadow-toolbar">
+      {canEdit && (tool === "shape" || drawingTool || tool === "eraser" || tool === "connector" || tool === "text") && (
+        <div
+          role="toolbar"
+          aria-label="Настройки инструмента"
+          className={`absolute z-toolbar flex items-center gap-1 rounded-md bg-bg p-1 shadow-toolbar ${settings.className}`}
+          style={bar.side === "right" ? { right: `calc(${barRight} + ${bar.compact ? 52 : 60}px)` } : undefined}
+        >
           {tool === "shape" &&
             (Object.keys(SHAPE_ICONS) as ShapeKind[]).map((k) => (
               <ToolButton key={k} small label={t.board.shapes[k]} active={shapeKind === k} onClick={() => setShapeKind(k)}><ShapeIcon kind={k} size={16} /></ToolButton>
             ))}
-          {tool === "connector" && <RoutePicker value={route} onChange={setRoute} vertical />}
-          <InkPicker value={ink} onChange={setInk} vertical />
+          {tool === "connector" && <RoutePicker value={route} onChange={setRoute} vertical={settings.vertical} />}
+          {(drawingTool || tool === "eraser") && <BrushSize tool={tool} value={sizes[tool]} onChange={(v) => setBrushSize(tool, v)} vertical={settings.vertical} />}
+          {tool !== "eraser" && <InkPicker value={ink} onChange={setInk} vertical={settings.vertical} look={look} />}
         </div>
       )}
 
@@ -1137,6 +1274,16 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
                   ))}
                 </div>
               )}
+              {types.size === 1 && types.has("drawing") && (
+                <>
+                  <BrushSize
+                    tool={selItems.every((i) => i.type === "drawing" && i.highlighter) ? "highlighter" : "pen"}
+                    value={single?.type === "drawing" ? single.width : undefined}
+                    onChange={(v) => updateItems(doc, selItems.filter((i) => i.type === "drawing" && !i.locked).map((i) => ({ id: i.id, patch: { width: v } })))}
+                  />
+                  <Divider />
+                </>
+              )}
               {single?.type === "connector" && (
                 <>
                   <RoutePicker value={single.route} onChange={(r) => patchSelected({ route: r })} />
@@ -1147,7 +1294,7 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
               {[...types].every((ty) => ty === "text" || ty === "shape" || ty === "connector" || ty === "drawing") && (
                 <>
                   <Divider />
-                  <InkPicker
+                  <InkPicker look={look}
                     value={single ? inkOf(single) : undefined}
                     onChange={(c) => updateItems(doc, selItems.filter((i) => !i.locked).map((i) => ({ id: i.id, patch: i.type === "text" ? { color: c } : { stroke: c } })))}
                   />
@@ -1184,10 +1331,11 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
         <ToolButton label={t.board.zoomIn} onClick={() => setVp((v) => stepZoom(v, 1, center))}><ZoomIn size={18} /></ToolButton>
         <ToolButton label={t.board.fit} onClick={fitAll}><Maximize size={18} /></ToolButton>
         <ToolButton label={t.frames.open} active={framesOpen} onClick={() => setFramesOpen((o) => !o)} buttonRef={framesOpener}><PanelRight size={18} /></ToolButton>
+        <ToolButton label={t.shortcuts.open} active={helpOpen} onClick={() => setHelpOpen(true)}><Keyboard size={18} /></ToolButton>
       </div>
       {framesOpen && (
         <FramesPanel
-          frames={items.filter((i): i is FrameItem => i.type === "frame")}
+          frames={frames}
           canRename={canEdit}
           current={single?.type === "frame" ? single.id : null}
           onShow={(f) => {
@@ -1198,12 +1346,19 @@ export function Board({ board, role, user, unread }: { board: { id: string; name
           onRename={(id, title) => {
             if (byId.get(id)?.type === "frame" && editable(id) && (byId.get(id) as FrameItem).title !== title) updateItems(doc, [{ id, patch: { title } }]);
           }}
+          onMove={(id, to) => {
+            if (!canEdit) return;
+            undo.stopCapturing(); // each move is its own undo step
+            moveFrame(doc, id, to);
+            undo.stopCapturing();
+          }}
           onClose={() => {
             setFramesOpen(false);
             framesOpener.current?.focus();
           }}
         />
       )}
+      <ShortcutsDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   );
 }
@@ -1246,7 +1401,7 @@ function describe(i: Item): string {
     case "connector":
       return `Линия${i.route === "curved" ? " плавная" : i.route === "elbow" ? " ломаная" : ""}${i.from.itemId && i.to.itemId ? " между объектами" : ""}${i.label ? `: ${i.label}` : ""}${lock}`;
     case "drawing":
-      return `Рисунок${i.highlighter ? " маркером" : ""}${lock}`;
+      return `Рисунок${i.highlighter ? " маркером" : ""}, толщина ${i.width}${lock}`;
     case "frame":
       return `Рамка: ${i.title || t.board.framePlaceholder}${lock}`;
     case "image":
@@ -1263,21 +1418,22 @@ function ShapeIcon({ kind, size }: { kind: ShapeKind; size: number }) {
   return <I size={size} />;
 }
 
-function DragPreview({ drag, scale, shapeKind, ink, highlighter, lookup }: { drag: Drag | null; scale: number; shapeKind: ShapeKind; ink: string; highlighter: boolean; lookup: (id: string) => Box | undefined }) {
+function DragPreview({ drag, scale, shapeKind, ink, highlighter, width, look, lookup }: { drag: Drag | null; scale: number; shapeKind: ShapeKind; ink: string; highlighter: boolean; width: number; look: BoardLook; lookup: (id: string) => Box | undefined }) {
   if (!drag) return null;
+  const C = { selection: look.selection, lassoFill: CANVAS.lassoFill };
   if (drag.kind === "marquee") {
     const r = rectFrom(drag.start, drag.current);
-    return <Rect x={r.x} y={r.y} width={r.w} height={r.h} fill={CANVAS.lassoFill} stroke={CANVAS.selection} strokeWidth={1 / scale} listening={false} />;
+    return <Rect x={r.x} y={r.y} width={r.w} height={r.h} fill={C.lassoFill} stroke={C.selection} strokeWidth={1 / scale} listening={false} />;
   }
   if (drag.kind === "lasso") {
-    return <Line points={drag.points} closed fill={CANVAS.lassoFill} stroke={CANVAS.selection} strokeWidth={1 / scale} dash={[5 / scale, 4 / scale]} listening={false} />;
+    return <Line points={drag.points} closed fill={C.lassoFill} stroke={C.selection} strokeWidth={1 / scale} dash={[5 / scale, 4 / scale]} listening={false} />;
   }
   if (drag.kind === "create") {
     const r = rectFrom(drag.start, drag.current);
     if (drag.what === "shape" && shapeKind === "ellipse") {
       return <Ellipse x={r.x + r.w / 2} y={r.y + r.h / 2} radiusX={r.w / 2} radiusY={r.h / 2} stroke={ink} strokeWidth={2 / scale} dash={[6 / scale, 4 / scale]} listening={false} />;
     }
-    return <Rect x={r.x} y={r.y} width={r.w} height={r.h} stroke={drag.what === "frame" ? CANVAS.selection : ink} strokeWidth={2 / scale} dash={[6 / scale, 4 / scale]} listening={false} />;
+    return <Rect x={r.x} y={r.y} width={r.w} height={r.h} stroke={drag.what === "frame" ? C.selection : ink} strokeWidth={2 / scale} dash={[6 / scale, 4 / scale]} listening={false} />;
   }
   if (drag.kind === "connect") {
     const fb = drag.from.itemId ? lookup(drag.from.itemId) : undefined;
@@ -1285,20 +1441,24 @@ function DragPreview({ drag, scale, shapeKind, ink, highlighter, lookup }: { dra
     const hb = drag.hover ? lookup(drag.hover) : undefined;
     return (
       <>
-        {hb && <Rect x={hb.x - 4} y={hb.y - 4} width={hb.w + 8} height={hb.h + 8} stroke={CANVAS.selection} strokeWidth={2 / scale} listening={false} />}
+        {hb && <Rect x={hb.x - 4} y={hb.y - 4} width={hb.w + 8} height={hb.h + 8} stroke={C.selection} strokeWidth={2 / scale} listening={false} />}
         <Arrow points={[start.x, start.y, drag.current.x, drag.current.y]} stroke={ink} fill={ink} strokeWidth={2 / scale} pointerLength={10 / scale} pointerWidth={10 / scale} listening={false} />
       </>
     );
   }
   if (drag.kind === "draw") {
-    return <Line points={drag.points} stroke={ink} strokeWidth={highlighter ? 16 : 3} opacity={highlighter ? 0.35 : 1} lineCap="round" lineJoin="round" tension={0.4} listening={false} />;
+    return <Line points={drag.points} stroke={ink} strokeWidth={width} opacity={highlighter ? 0.35 : 1} lineCap="round" lineJoin="round" tension={0.4} listening={false} />;
   }
   return null;
 }
 
 /** The board's items. Memoised on its props: panning re-renders it only when different items come into view. */
-const Items = memo(function Items({ visible, byId, editing, scale, detail, onTransformEnd }: { visible: Item[]; byId: Map<string, Item>; editing: string | null; scale: number; detail: Detail; onTransformEnd: () => void }) {
-  return visible.map((i) => (
+const Items = memo(function Items({ visible, byId, editing, scale, detail, onTransformEnd, look, lifted }: { visible: Item[]; byId: Map<string, Item>; editing: string | null; scale: number; detail: Detail; onTransformEnd: () => void; look: BoardLook; lifted: Set<string> }) {
+  // Far out: everything from one bulk shape, except the selected items (and the one being edited), which keep
+  // nodes of their own so the resize handles can attach to them; they are drawn on top.
+  const nodes = detail === "low" ? visible.filter((i) => lifted.has(i.id) || i.id === editing) : visible;
+  const bulk = detail === "low" ? (nodes.length ? visible.filter((i) => !lifted.has(i.id) && i.id !== editing) : visible) : null;
+  const views = nodes.map((i) => (
     <ItemView
       key={i.id}
       item={i}
@@ -1309,8 +1469,16 @@ const Items = memo(function Items({ visible, byId, editing, scale, detail, onTra
       from={i.type === "connector" && i.from.itemId ? byId.get(i.from.itemId) : undefined}
       to={i.type === "connector" && i.to.itemId ? byId.get(i.to.itemId) : undefined}
       onTransformEnd={onTransformEnd}
+      look={look}
     />
   ));
+  if (!bulk) return views;
+  return (
+    <>
+      <BulkItems items={bulk} byId={byId} look={look} scale={scale} version={byId} />
+      {views}
+    </>
+  );
 });
 
 /** What the canvas shows, for screen readers (and tests). Memoised: it only changes with the items, not on pan or zoom. */
@@ -1395,11 +1563,11 @@ function Swatch({ name, fill, checked, onClick }: { name: string; fill: string; 
   );
 }
 
-function InkPicker({ value, onChange, vertical }: { value?: string; onChange: (c: string) => void; vertical?: boolean }) {
+function InkPicker({ value, onChange, vertical, look }: { value?: string; onChange: (c: string) => void; vertical?: boolean; look: BoardLook }) {
   return (
     <div role="radiogroup" aria-label={t.board.ink} className={`flex gap-1 p-1 ${vertical ? "flex-col items-center" : ""}`}>
       {INK.map((c) => (
-        <Swatch key={c} name={c} fill={c} checked={value === c} onClick={() => onChange(c)} />
+        <Swatch key={c} name={c} fill={inkOn(look, c)} checked={value === c} onClick={() => onChange(c)} />
       ))}
     </div>
   );
@@ -1430,7 +1598,7 @@ function InlineInput({ label, value, placeholder, style, onChange, onDone }: { l
   );
 }
 
-function TextEditor({ item, vp, onChange, onDone, onStyle }: { item: Extract<Item, { text: string }>; vp: Viewport; onChange: (t: string) => void; onDone: (text: string) => void; onStyle: (key: TextStyle) => void }) {
+function TextEditor({ item, vp, look, onChange, onDone, onStyle }: { item: Extract<Item, { text: string }>; vp: Viewport; look: BoardLook; onChange: (t: string) => void; onDone: (text: string) => void; onStyle: (key: TextStyle) => void }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     const el = ref.current;
@@ -1441,7 +1609,7 @@ function TextEditor({ item, vp, onChange, onDone, onStyle }: { item: Extract<Ite
   const free = item.type === "text";
   const fontSize = free ? item.fontSize : fittedFontSize(item);
   const colors =
-    item.type === "sticky" ? stickyPair(item.color) : item.type === "shape" ? (item.fill === "none" ? { fill: "transparent", text: item.stroke } : stickyPair(item.fill)) : { fill: "transparent", text: item.color };
+    item.type === "sticky" ? stickyPair(item.color) : item.type === "shape" ? (item.fill === "none" ? { fill: "transparent", text: inkOn(look, item.stroke) } : stickyPair(item.fill)) : { fill: "transparent", text: inkOn(look, item.color) };
   const lines = Math.max(1, item.text.split("\n").length);
   return (
     <textarea

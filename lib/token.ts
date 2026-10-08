@@ -37,4 +37,6 @@ export interface RealtimeClaims {
   name: string;
   boardId: string;
   role: "owner" | "coowner" | "editor" | "commenter" | "viewer";
+  /** Someone not signed in, viewing through the board's link: always read-only. */
+  guest?: boolean;
 }

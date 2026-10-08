@@ -154,6 +154,23 @@ export async function setLinkAccess(boardId: string, access: string) {
   await data.setLinkAccess(user.id, id.parse(boardId), z.enum(["private", "view", "comment", "edit"]).parse(access));
 }
 
+export async function setGuestView(boardId: string, on: boolean) {
+  const user = await requireUser();
+  await data.setGuestView(user.id, id.parse(boardId), z.boolean().parse(on));
+}
+
+/** The board's link secret, for the link people copy. Anyone on the board; never sent with the page itself. */
+export async function getShareSecret(boardId: string): Promise<string> {
+  const user = await requireUser();
+  return data.getLinkSecret(user.id, id.parse(boardId));
+}
+
+/** A new link secret: every link given out before stops working. Owners and co-owners. */
+export async function resetShareSecret(boardId: string): Promise<string> {
+  const user = await requireUser();
+  return data.resetLinkSecret(user.id, id.parse(boardId));
+}
+
 // ---------- comments (S09) ----------
 
 const body = z.string().trim().min(1).max(5000);

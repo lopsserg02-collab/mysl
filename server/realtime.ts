@@ -73,12 +73,16 @@ const server = new Server<RealtimeClaims>({
     const claims = verify<RealtimeClaims>(token);
     if (!claims || `board:${claims.boardId}` !== documentName) throw new Error("Not authorised");
     // Viewers and commenters get a read-only connection: the server drops their document updates.
-    connectionConfig.readOnly = !["owner", "coowner", "editor"].includes(claims.role);
+    // Guests (not signed in, viewing by link) are always read-only, whatever role a token says.
+    connectionConfig.readOnly = claims.guest === true || !["owner", "coowner", "editor"].includes(claims.role);
     return claims;
   },
   // "comments" means someone changed a comment thread: tell everyone else on the board to fetch again.
   // The signal carries no data, so read-only viewers learn nothing they could not fetch themselves.
+  // Only people who may comment send it; guests and viewers cannot make others refetch.
   async onStateless({ payload, document, connection }) {
+    const claims = connection.context as RealtimeClaims | undefined;
+    if (!claims || claims.guest || !["owner", "coowner", "editor", "commenter"].includes(claims.role)) return;
     if (payload === "comments") document.broadcastStateless("comments", (c) => c !== connection);
   },
   extensions: [new Database(process.env.DATA_LAYER === "postgres" ? postgresStore() : fileStore())],

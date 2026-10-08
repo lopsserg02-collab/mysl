@@ -19,6 +19,8 @@ export interface Board {
   name: string;
   description: string;
   linkAccess: LinkAccess;
+  /** With link access on, people who are not signed in may also view the board through the link, read-only. */
+  guestView: boolean;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
@@ -156,8 +158,24 @@ export interface DataLayer {
   setMemberRole(userId: string, boardId: string, memberId: string, role: ShareRole | null): Promise<void>;
   cancelInvite(userId: string, boardId: string, email: string): Promise<void>;
   setLinkAccess(userId: string, boardId: string, access: LinkAccess): Promise<void>;
-  /** A signed-in person opening a board shared by link joins it with the link's role. maxRole caps an edit link (the plan's editor limit). */
-  joinViaLink(userId: string, boardId: string, opts?: { maxRole?: "commenter" | "viewer" }): Promise<BoardRole | null>;
+  /** Owners and co-owners turn guest viewing (no sign-in, read-only) on or off. */
+  setGuestView(userId: string, boardId: string, on: boolean): Promise<void>;
+  /** The board link's secret, for anyone on the board (it goes into the link they copy). */
+  getLinkSecret(userId: string, boardId: string): Promise<string>;
+  /** Owners and co-owners make a new secret: every link given out before stops working. */
+  resetLinkSecret(userId: string, boardId: string): Promise<string>;
+  /**
+   * A signed-in person opening a board shared by link joins it with the link's role. The link's secret is
+   * required: a board id alone is never enough. maxRole caps an edit link (the plan's editor limit).
+   */
+  joinViaLink(userId: string, boardId: string, opts: { secret: string; maxRole?: "commenter" | "viewer" }): Promise<BoardRole | null>;
+  /**
+   * Someone who is not signed in, holding the link: the board's id and name when guest viewing is on and the
+   * secret matches, otherwise null. Guests are read-only; there is nothing else they can call.
+   */
+  guestBoard(boardId: string, secret: string): Promise<{ id: string; name: string } | null>;
+  /** An image for a guest: only on the board whose link secret they hold, and only while guest viewing is on. */
+  getGuestAsset(assetId: string, secret: string): Promise<Asset | null>;
   // Comments (S09): anyone on the board reads them; commenters and up write. Mentions notify people on the board.
   listThreads(userId: string, boardId: string): Promise<CommentThread[]>;
   createThread(userId: string, boardId: string, at: { x: number; y: number; itemId?: string | null }, body: string, mentions?: string[]): Promise<CommentThread>;
@@ -181,6 +199,9 @@ export interface DataLayer {
   /** Runs apply once per Stripe event id, atomically with recording the id. Returns false for an event seen before. */
   applyStripeEvent(event: { id: string; type: string }, apply: (w: BillingWriter) => Promise<void>): Promise<boolean>;
 }
+
+/** Link secrets are 32 to 64 lower-case hex characters; anything else is rejected before any lookup. */
+export const LINK_SECRET = /^[0-9a-f]{32,64}$/;
 
 export const canEditBoard = (r: BoardRole | null) => r === "owner" || r === "coowner" || r === "editor";
 

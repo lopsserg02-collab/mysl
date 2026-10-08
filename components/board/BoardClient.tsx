@@ -13,7 +13,14 @@ const Board = dynamic(() => import("./Board").then((m) => m.Board), {
   ),
 });
 
-export function BoardClient(props: { board: { id: string; name: string; linkAccess: LinkAccess }; role: BoardRole; user: { id: string; name: string }; unread?: number }) {
+export function BoardClient(props: {
+  board: { id: string; name: string; linkAccess: LinkAccess; guestView: boolean };
+  role: BoardRole;
+  user: { id: string; name: string };
+  unread?: number;
+  /** Viewing by link without signing in: read-only, no people, no comments. */
+  guest?: { secret: string; signIn: string };
+}) {
   return (
     <div className="fixed inset-0">
       <Board {...props} />

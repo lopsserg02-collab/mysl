@@ -1,7 +1,8 @@
 import { test, expect } from "@playwright/test";
-import { boardReady, guard, signIn } from "./helpers";
+import { boardReady, guard, shareLink, signIn } from "./helpers";
 
 const uniq = () => Math.random().toString(36).slice(2, 8);
+const expectLink = shareLink;
 
 test("F08: invite by email before sign-up, change the role, open to everyone by link", async ({ browser }) => {
   const owner = await (await browser.newContext()).newPage();
@@ -47,11 +48,17 @@ test("F08: invite by email before sign-up, change the role, open to everyone by 
   await expect(stranger.getByRole("heading", { name: "Эта доска недоступна" })).toBeVisible();
   await dialog.getByRole("combobox", { name: "Доступ по ссылке" }).selectOption("view");
   await expect(dialog.getByText("только тот, кто вошёл")).toBeVisible();
-  // The setting saves in the background; the stranger's next visit gets in once it has.
+  // The link carries the board's secret; the board's address alone still opens nothing.
+  const link = await expectLink(dialog);
+  await stranger.reload();
+  await expect(stranger.getByRole("heading", { name: "Эта доска недоступна" })).toBeVisible();
+  // The setting saves in the background; the stranger's visit by link gets in once it has.
   await expect(async () => {
-    await stranger.reload();
+    await stranger.goto(link);
     await expect(stranger.getByRole("navigation", { name: "Инструменты" })).toBeVisible({ timeout: 2000 });
   }).toPass();
+  // Joined: the secret leaves the address bar.
+  await expect(stranger).toHaveURL(url);
   await boardReady(stranger);
   await expect(stranger.getByRole("button", { name: "Стикер (N)" })).toHaveCount(0);
   // Viewers see who is on the board but cannot change it

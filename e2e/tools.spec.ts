@@ -60,7 +60,7 @@ test("pen draws, eraser erases, frame wraps the selection, lock blocks delete", 
   await page.mouse.down();
   for (let i = 1; i <= 10; i++) await page.mouse.move(300 + i * 20, 300 + (i % 2) * 30);
   await page.mouse.up();
-  await expect(list(page)).toHaveText(["Рисунок"]);
+  await expect(list(page)).toHaveText(["Рисунок, толщина 3"]);
 
   await page.keyboard.press("e");
   await page.mouse.move(250, 320);

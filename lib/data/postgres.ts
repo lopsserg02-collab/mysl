@@ -1,10 +1,10 @@
 // Postgres data layer (Supabase or any Postgres with db/dev/supabase-stub.sql).
 // Every user query runs as the `authenticated` role with the user's id in the JWT claims,
 // so the row level security policies in db/migrations decide what each person can see and change.
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { cloneBoardState } from "../board/clone";
-import { AccessError, TRASH_DAYS, canEditBoard, type AppNotification, type Board, type BoardListItem, type BoardRole, type DataLayer, type Asset, type Comment, type CommentThread, type Person, type User, type BillingWriter, type Subscription } from "./types";
+import { AccessError, LINK_SECRET, TRASH_DAYS, canEditBoard, type AppNotification, type Board, type BoardListItem, type BoardRole, type DataLayer, type Asset, type Comment, type CommentThread, type Person, type User, type BillingWriter, type Subscription } from "./types";
 
 type Sql = postgres.Sql;
 type Tx = postgres.TransactionSql;
@@ -33,6 +33,15 @@ async function asUser<T>(userId: string, fn: (tx: Tx) => Promise<T>): Promise<T>
   }
 }
 
+// Someone who is not signed in: Supabase's anon role, which reaches boards only through the guest_* functions.
+function asGuest<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
+  return sql().begin(async (tx) => {
+    await tx`select set_config('request.jwt.claims', ${JSON.stringify({ role: "anon" })}, true)`;
+    await tx.unsafe("set local role anon");
+    return fn(tx);
+  }) as Promise<T>;
+}
+
 interface BoardRow {
   id: string;
   team_id: string;
@@ -40,6 +49,7 @@ interface BoardRow {
   name: string;
   description: string;
   link_access: Board["linkAccess"];
+  guest_view: boolean;
   created_at: Date;
   updated_at: Date;
   deleted_at: Date | null;
@@ -53,6 +63,7 @@ const toBoard = (r: BoardRow): Board => ({
   name: r.name,
   description: r.description,
   linkAccess: r.link_access,
+  guestView: r.guest_view ?? false,
   createdAt: r.created_at.toISOString(),
   updatedAt: (r.content_updated_at && r.content_updated_at > r.updated_at ? r.content_updated_at : r.updated_at).toISOString(),
   deletedAt: r.deleted_at ? r.deleted_at.toISOString() : null,
@@ -111,8 +122,9 @@ export const postgresData: DataLayer = {
 
   async getBoard(boardId) {
     if (!UUID.test(boardId)) return null;
-    // Metadata only (name for the page title); access is checked separately with getRole.
-    const [row] = await sql()<BoardRow[]>`select * from boards where id = ${boardId}`;
+    // Metadata only (name for the page title); access is checked separately with getRole. Never the link secret.
+    const [row] = await sql()<BoardRow[]>`select id, team_id, owner_id, name, description, link_access, guest_view, created_at, updated_at, deleted_at, content_updated_at
+      from boards where id = ${boardId}`;
     return row ? toBoard(row) : null;
   },
 
@@ -227,11 +239,47 @@ export const postgresData: DataLayer = {
     if (n.count === 0) throw new AccessError();
   },
 
-  async joinViaLink(userId, boardId, opts = {}) {
+  async setGuestView(userId, boardId, on) {
+    // Row level security: only owners and co-owners update boards.
+    const n = await asUser(userId, (tx) => tx`update boards set guest_view = ${on} where id = ${boardId} and deleted_at is null`);
+    if (n.count === 0) throw new AccessError();
+  },
+
+  async getLinkSecret(userId, boardId) {
+    if (!UUID.test(boardId)) throw new AccessError();
+    // Row level security: anyone on the board reads its row.
+    const [row] = await asUser(userId, (tx) => tx<{ link_token: string }[]>`select link_token from boards where id = ${boardId} and deleted_at is null`);
+    if (!row) throw new AccessError();
+    return row.link_token;
+  },
+
+  async resetLinkSecret(userId, boardId) {
+    if (!UUID.test(boardId)) throw new AccessError();
+    const next = randomBytes(16).toString("hex");
+    const n = await asUser(userId, (tx) => tx`update boards set link_token = ${next} where id = ${boardId} and deleted_at is null`);
+    if (n.count === 0) throw new AccessError();
+    return next;
+  },
+
+  async joinViaLink(userId, boardId, opts) {
     if (!UUID.test(boardId)) return null;
     const cap = opts.maxRole ?? null;
-    const [row] = await asUser(userId, (tx) => tx<{ role: BoardRole | null }[]>`select join_board_via_link(${boardId}, ${cap}::text) as role`);
+    const secret = LINK_SECRET.test(opts.secret ?? "") ? opts.secret : "";
+    const [row] = await asUser(userId, (tx) => tx<{ role: BoardRole | null }[]>`select join_board_via_link(${boardId}, ${secret}::text, ${cap}::text) as role`);
     return row?.role ?? null;
+  },
+
+  async guestBoard(boardId, secret) {
+    if (!UUID.test(boardId) || typeof secret !== "string" || !LINK_SECRET.test(secret)) return null;
+    const [row] = await asGuest((tx) => tx<{ id: string; name: string }[]>`select * from guest_board(${boardId}, ${secret})`);
+    return row ?? null;
+  },
+
+  async getGuestAsset(assetId, secret) {
+    if (!UUID.test(assetId) || typeof secret !== "string" || !LINK_SECRET.test(secret)) return null;
+    const [r] = await asGuest((tx) => tx<{ id: string; board_id: string; storage_path: string; mime: Asset["mime"]; bytes: number; width: number | null; height: number | null }[]>`
+      select * from guest_asset(${assetId}, ${secret})`);
+    return r ? { id: r.id, boardId: r.board_id, storagePath: r.storage_path, mime: r.mime, bytes: r.bytes, width: r.width, height: r.height } : null;
   },
 
   listThreads(userId, boardId) {
