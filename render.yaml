@@ -5,6 +5,7 @@ services:
     name: mysl-realtime
     runtime: node
     plan: free
+    region: frankfurt # next to the Supabase database (eu-central-1); a region is chosen only when the service is created
     buildCommand: npm ci
     startCommand: npm run start:realtime
     healthCheckPath: /

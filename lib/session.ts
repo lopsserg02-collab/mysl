@@ -1,4 +1,5 @@
 import "server-only";
+import { cache } from "react";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { data, type User } from "./data";
@@ -26,18 +27,21 @@ export async function endSession() {
   if (supabaseAuthEnabled()) await (await supabaseServer()).auth.signOut();
 }
 
-export async function currentUser(): Promise<User | null> {
+// Once per request: a page and its metadata both ask, and each answer costs a database round trip.
+export const currentUser = cache(async (): Promise<User | null> => {
   if (devSignInEnabled()) {
     const claims = verify<{ userId: string }>((await cookies()).get(COOKIE)?.value);
     if (claims) return data.getUser(claims.userId);
   }
   if (supabaseAuthEnabled()) {
-    // getUser() checks the token with Supabase rather than trusting the cookie.
-    const { data: auth } = await (await supabaseServer()).auth.getUser();
-    if (auth.user) return data.getUser(auth.user.id);
+    // getClaims() verifies the token's signature (with the project's public keys, or by asking Supabase when
+    // the project still signs with a shared secret) rather than trusting the cookie.
+    const { data: auth } = await (await supabaseServer()).auth.getClaims();
+    const id = auth?.claims?.sub;
+    if (id) return data.getUser(id);
   }
   return null;
-}
+});
 
 export async function requireUser(next?: string): Promise<User> {
   const user = await currentUser();
