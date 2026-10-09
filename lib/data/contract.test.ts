@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import * as Y from "yjs";
 import { addItem, addSticky, readAll, type ImageItem } from "../board/model";
-import { daysUntilPurge, type DataLayer } from "./types";
+import { LOGIN_LINKS_PER_HOUR, daysUntilPurge, type DataLayer } from "./types";
 
 process.env.DATA_DIR = mkdtempSync(path.join(os.tmpdir(), "mysl-data-"));
 const layers: [string, () => Promise<DataLayer>][] = [["local", async () => (await import("./local")).localData]];
@@ -501,5 +501,21 @@ if (process.env.TEST_DATABASE_URL) {
     await assert.rejects(asB((tx) => tx`select seed_board_doc(${other.id}, ${Buffer.from([0, 0])})`));
     await assert.rejects(asB((tx) => tx`select board_doc_state(${other.id})`));
     assert.equal((await data.listNotifications(a.id)).find((n) => n.id === own.id)?.read, false);
+  });
+}
+
+for (const [name, load] of layers) {
+  test(`${name}: sign-in links work once, expire, and are limited per address`, async () => {
+    const data = await load();
+    const email = `link-${uniq()}@example.com`;
+    const h = () => randomUUID() + randomUUID();
+    const first = h();
+    assert.equal(await data.createLoginLink(email, first, "/pricing"), "ok");
+    assert.deepEqual(await data.useLoginLink(first), { email, next: "/pricing" });
+    assert.equal(await data.useLoginLink(first), null);
+    assert.equal(await data.useLoginLink(h()), null);
+    for (let i = 1; i < LOGIN_LINKS_PER_HOUR; i++) assert.equal(await data.createLoginLink(email, h(), "/"), "ok");
+    assert.equal(await data.createLoginLink(email, h(), "/"), "too_many");
+    assert.equal(await data.createLoginLink(`other-${uniq()}@example.com`, h(), "/"), "ok");
   });
 }

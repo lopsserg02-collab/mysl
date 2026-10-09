@@ -22,7 +22,7 @@ export function guard(page: Page) {
 
 export async function signIn(page: Page, email: string, name: string) {
   await page.goto("/login");
-  // The test sign-in form; the Supabase form above it has its own email field when Supabase is configured.
+  // The test sign-in form; the email-link form above it has its own email field.
   const form = page.locator("form", { has: page.getByLabel("Как вас зовут") });
   await form.getByLabel("Как вас зовут").fill(name);
   await form.getByLabel("Электронная почта").fill(email);

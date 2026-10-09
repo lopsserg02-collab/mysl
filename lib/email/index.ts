@@ -1,5 +1,7 @@
-// Email through Resend's HTTP API (https://resend.com/docs/api-reference/emails/send-email). No SDK: one fetch.
-// Without RESEND_API_KEY nothing is sent and the app works as before; the skip is logged.
+// Email through any SMTP server (SMTP_URL, e.g. a Russian transactional service such as Unisender Go, or
+// Yandex 360), or through Resend's HTTP API (RESEND_API_KEY). SMTP wins when both are set.
+// Without either, nothing is sent and the app works as before; the skip is logged.
+import nodemailer from "nodemailer";
 import { t } from "../copy";
 import type { ShareRole } from "../data/types";
 
@@ -14,15 +16,30 @@ export type SendResult = "sent" | "skipped" | "failed";
 
 const RESEND_URL = "https://api.resend.com/emails";
 
-/** Never throws: email is a side effect, and a failed send must not fail the action that caused it. */
+let smtp: nodemailer.Transporter | null = null;
+let smtpUrl = "";
+
+/** Is any way of sending mail configured? */
+export const emailConfigured = () => Boolean((process.env.SMTP_URL || process.env.RESEND_API_KEY) && process.env.EMAIL_FROM);
+
+/** Never throws: a failed send is reported, not raised. */
 export async function sendEmail(mail: Email, fetcher: typeof fetch = fetch): Promise<SendResult> {
-  const key = process.env.RESEND_API_KEY;
   const from = process.env.EMAIL_FROM;
-  if (!key || !from) {
-    console.info(`[email] ${!key ? "RESEND_API_KEY" : "EMAIL_FROM"} is not set, not sending "${mail.subject}"`);
+  const url = process.env.SMTP_URL;
+  const key = process.env.RESEND_API_KEY;
+  if ((!url && !key) || !from) {
+    console.info(`[email] ${!from ? "EMAIL_FROM" : "SMTP_URL / RESEND_API_KEY"} is not set, not sending "${mail.subject}"`);
     return "skipped";
   }
   try {
+    if (url) {
+      if (!smtp || smtpUrl !== url) {
+        smtp = nodemailer.createTransport(url, { connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 20_000 });
+        smtpUrl = url;
+      }
+      await smtp.sendMail({ from, to: mail.to, subject: mail.subject, text: mail.text, html: mail.html });
+      return "sent";
+    }
     const res = await fetcher(RESEND_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
@@ -45,13 +62,13 @@ export function boardUrl(origin: string, boardId: string) {
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
 // Plain and short: a few paragraphs, one link, no images or tracking.
-function render(paragraphs: string[], link: { label: string; url: string }) {
-  const text = [...paragraphs, `${link.label}: ${link.url}`, "—", t.email.footer].join("\n\n");
+function render(paragraphs: string[], link: { label: string; url: string }, footer: string = t.email.footer) {
+  const text = [...paragraphs, `${link.label}: ${link.url}`, "—", footer].join("\n\n");
   const html = [
     '<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;line-height:1.5;color:#1a1a1a">',
     ...paragraphs.map((p) => `<p>${esc(p).replace(/\n/g, "<br>")}</p>`),
     `<p><a href="${esc(link.url)}">${esc(link.label)}</a></p>`,
-    `<p style="color:#6b6b6b;font-size:13px">${esc(t.email.footer)}</p>`,
+    `<p style="color:#6b6b6b;font-size:13px">${esc(footer)}</p>`,
     "</div>",
   ].join("");
   return { text, html };
@@ -66,4 +83,9 @@ export function mentionEmail(p: { to: string; author: string; board: string; com
   const quote = p.comment.length > 500 ? `${p.comment.slice(0, 500)}…` : p.comment;
   const { text, html } = render([t.email.mentionBody(p.author, p.board), `«${quote}»`], { label: t.email.mentionLink, url: p.url });
   return { to: p.to, subject: t.email.mentionSubject(p.author, p.board), text, html };
+}
+
+export function loginEmail(p: { to: string; url: string }): Email {
+  const { text, html } = render([t.email.loginBody, t.email.loginExpiry], { label: t.email.loginLink, url: p.url }, t.email.loginFooter);
+  return { to: p.to, subject: t.email.loginSubject, text, html };
 }

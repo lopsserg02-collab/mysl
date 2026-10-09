@@ -1,32 +1,40 @@
 import { test, expect } from "@playwright/test";
 import { guard } from "./helpers";
 
-// Runs only when Supabase Auth is configured (NEXT_PUBLIC_SUPABASE_URL and DATA_LAYER=postgres).
-test("Google sign-in hands off to Supabase and returns to /auth/callback", async ({ page }) => {
+const uniq = () => Math.random().toString(36).slice(2, 10);
+
+// Without mail configured (development), the page shows the link instead of sending it.
+test("sign-in by email link: consent first, the link works once and keeps the destination", async ({ page }) => {
   const check = guard(page);
-  await page.goto("/login?next=/");
-  const google = page.getByRole("button", { name: "Войти через Google" });
-  test.skip((await google.count()) === 0, "Supabase Auth is not configured");
-  // Stop at Supabase's door: no request leaves the test machine.
-  let authorize: URL | null = null;
-  await page.route(/\/auth\/v1\/authorize/, (route) => {
-    authorize = new URL(route.request().url());
-    return route.fulfill({ status: 200, body: "ok" });
-  });
-  // Without the consent box ticked nothing leaves the page.
-  await google.click();
-  await expect(page.getByRole("alert").filter({ hasText: "отметьте согласие" })).toBeVisible();
-  expect(authorize).toBeNull();
-  await page.getByRole("checkbox", { name: /согласие на обработку персональных данных/ }).check();
-  await google.click();
-  await expect.poll(() => authorize?.searchParams.get("provider")).toBe("google");
-  const back = new URL(authorize!.searchParams.get("redirect_to")!);
-  expect(back.pathname).toBe("/auth/callback");
-  expect(back.searchParams.get("next")).toBe("/");
+  await page.goto("/login?next=/pricing");
+  const form = page.locator("form", { has: page.getByRole("button", { name: "Получить ссылку" }) });
+  await form.getByLabel("Электронная почта").fill(`link-${uniq()}@example.com`);
+  await form.getByRole("button", { name: "Получить ссылку" }).click();
+  await expect(form.getByRole("alert")).toHaveText(/отметьте согласие/);
+
+  await form.getByRole("checkbox", { name: /согласие на обработку персональных данных/ }).check();
+  await form.getByRole("button", { name: "Получить ссылку" }).click();
+  const link = page.getByRole("link", { name: "войти", exact: true });
+  await expect(link).toBeVisible();
+  const href = (await link.getAttribute("href"))!;
+  expect(new URL(href).pathname).toBe("/auth/link");
+
+  // Opening the link signs nobody in by itself: mail scanners open links too.
+  await page.goto(href);
+  await page.goto(href);
+  await page.getByRole("button", { name: "Войти" }).click();
+  await expect(page).toHaveURL(/\/pricing$/);
+
+  // Used once, it is spent.
+  await page.context().clearCookies();
+  await page.goto(href);
+  await page.getByRole("button", { name: "Войти" }).click();
+  await expect(page).toHaveURL(/\/login\?error=link/);
+  await expect(page.getByRole("alert").filter({ hasText: "Ссылка устарела" })).toBeVisible();
   check();
 });
 
-test("an expired sign-in link explains itself", async ({ page }) => {
+test("an old sign-in link explains itself", async ({ page }) => {
   await page.goto("/auth/callback?code=not-a-real-code");
   await expect(page).toHaveURL(/\/login\?error=link/);
   await expect(page.getByRole("alert").filter({ hasText: "Ссылка устарела" })).toBeVisible();
