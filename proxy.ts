@@ -2,6 +2,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
 // Keeps the Supabase session fresh: an expired access token is swapped for a new one before the page renders.
+// getSession() reads the cookie and calls Supabase only when the token has expired, so most requests pass
+// straight through. It proves nothing about who the caller is: currentUser() verifies the token.
 export async function proxy(request: NextRequest) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -17,7 +19,7 @@ export async function proxy(request: NextRequest) {
       },
     },
   });
-  await supabase.auth.getUser();
+  await supabase.auth.getSession();
   return response;
 }
 
