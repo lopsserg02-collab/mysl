@@ -99,3 +99,15 @@
 8. **Проверка.** Войдите, откройте **Тариф → Перейти на Pro** и оплатите тестовой картой `4242 4242 4242 4242` (любая будущая дата, любой CVC). Через несколько секунд страница «Тариф» покажет Pro. Там же нажмите «Отменить подписку» и подтвердите.
 
 Ключи вставляются только в панели Vercel. В код и в чат их не пишите.
+
+## Realtime server on your own Ubuntu machine (instead of Render)
+
+`deploy/realtime/` runs the realtime server in Docker behind Caddy, which gets the HTTPS certificate by itself.
+Without a domain it uses `<ip-with-dashes>.sslip.io`. As root on the machine:
+
+    curl -fsSL https://raw.githubusercontent.com/lopsserg02-collab/mysl/main/deploy/realtime/install.sh | bash
+
+It asks once for `DATABASE_URL` (the Session pooler string, as on Render) and `REALTIME_SECRET` (the same value
+as on Vercel), keeps them in `/opt/mysl/deploy/realtime/.env`, and prints the `wss://` address. Put that address
+in Vercel's `NEXT_PUBLIC_REALTIME_URL` and redeploy. Running the same command again updates the code.
+Ports 80 and 443 must be free.
