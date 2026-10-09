@@ -26,7 +26,11 @@ if [ ! -f .env ]; then
       echo "Порт $p уже занят другой программой. Напишите об этом в чат — подберу другой вариант."; exit 1
     fi
   done
-  ip=$(curl -4 -fsS https://api.ipify.org)
+  # The machine's own public address. Asking a website is wrong when outgoing traffic leaves through a VPN,
+  # so read it from the network interfaces; MYSL_IP overrides it.
+  ip=${MYSL_IP:-$(ip -4 -o addr show scope global | awk '{split($4,a,"/"); print a[1]}' \
+    | grep -Ev '^(10\.|127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)' | head -1)}
+  [ -n "$ip" ] || { echo "Не нашёл внешний адрес сервера. Напишите об этом в чат."; exit 1; }
   host="${ip//./-}.sslip.io"
   echo
   echo "Скопируйте значения из Render (mysl-realtime → Environment). Набранное не отображается — это нормально."
@@ -37,7 +41,26 @@ if [ ! -f .env ]; then
   printf 'MYSL_HOST=%s\nDATABASE_URL=%s\nREALTIME_SECRET=%s\n' "$host" "$db" "$secret" > .env
 fi
 
-if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null; fi
+# LC_ALL=C: ufw prints its status in the system language.
+if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q "Status: active"; then ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null; fi
+
+# A VPN on the host (wg-quick style policy rules) can steal replies from
+# Docker containers, so certificates never arrive. Send Docker traffic via
+# the main routing table, now and after every reboot.
+cat > /etc/systemd/system/mysl-route.service <<'UNIT'
+[Unit]
+Description=Mysl: Docker traffic bypasses VPN
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'ip rule show | grep -q "from 172.16.0.0/12 lookup main" || ip rule add from 172.16.0.0/12 lookup main priority 8999'
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now mysl-route >/dev/null 2>&1 || true
 
 docker compose up -d --build
 host=$(grep '^MYSL_HOST=' .env | cut -d= -f2)
