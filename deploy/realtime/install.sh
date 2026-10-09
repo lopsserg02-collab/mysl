@@ -44,6 +44,24 @@ fi
 # LC_ALL=C: ufw prints its status in the system language.
 if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q "Status: active"; then ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null; fi
 
+# A VPN on the host (wg-quick style policy rules) can steal replies from
+# Docker containers, so certificates never arrive. Send Docker traffic via
+# the main routing table, now and after every reboot.
+cat > /etc/systemd/system/mysl-route.service <<'UNIT'
+[Unit]
+Description=Mysl: Docker traffic bypasses VPN
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'ip rule show | grep -q "from 172.16.0.0/12 lookup main" || ip rule add from 172.16.0.0/12 lookup main priority 8999'
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now mysl-route >/dev/null 2>&1 || true
+
 docker compose up -d --build
 host=$(grep '^MYSL_HOST=' .env | cut -d= -f2)
 echo
