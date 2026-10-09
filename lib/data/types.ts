@@ -132,8 +132,18 @@ export function daysUntilPurge(deletedAt: string, now = Date.now()): number {
   return Math.max(0, Math.ceil(left / 86_400_000));
 }
 
+/** A sign-in link works this long, and once. */
+export const LOGIN_LINK_MINUTES = 30;
+/** At most this many sign-in links per address per hour, so the form cannot be used to flood someone's inbox. */
+export const LOGIN_LINKS_PER_HOUR = 5;
+
 export interface DataLayer {
+  /** Finds or creates the account for this address. Call only once the address is proven (a used sign-in link). */
   upsertUserByEmail(email: string, name: string): Promise<User>;
+  /** Stores a new sign-in link by the hash of its secret. "too_many" when the hourly limit for the address is reached. */
+  createLoginLink(email: string, tokenHash: string, next: string): Promise<"ok" | "too_many">;
+  /** Uses up a sign-in link: its address and destination, or null when it is unknown, used or expired. */
+  useLoginLink(tokenHash: string): Promise<{ email: string; next: string } | null>;
   getUser(id: string): Promise<User | null>;
   listBoards(userId: string, opts?: { q?: string; sort?: BoardSort; starredOnly?: boolean; trashed?: boolean }): Promise<BoardListItem[]>;
   createBoard(userId: string, name?: string): Promise<Board>;

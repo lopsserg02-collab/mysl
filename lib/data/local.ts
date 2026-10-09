@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { cloneBoardState } from "../board/clone";
-import { AccessError, LINK_SECRET, SHARE_ROLES, TRASH_DAYS, canComment, canEditBoard, linkRole, type AppNotification, type Board, type BoardListItem, type Asset, type BoardRole, type Comment, type CommentThread, type DataLayer, type Person, type ShareRole, type Subscription, type BillingWriter, type BoardUsage, type User } from "./types";
+import { AccessError, LINK_SECRET, LOGIN_LINK_MINUTES, LOGIN_LINKS_PER_HOUR, SHARE_ROLES, TRASH_DAYS, canComment, canEditBoard, linkRole, type AppNotification, type Board, type BoardListItem, type Asset, type BoardRole, type Comment, type CommentThread, type DataLayer, type Person, type ShareRole, type Subscription, type BillingWriter, type BoardUsage, type User } from "./types";
 
 interface Db {
   users: User[];
@@ -18,6 +18,7 @@ interface Db {
   notifications?: { id: string; userId: string; kind: "mention" | "invite"; boardId: string; commentId: string | null; actorId: string; readAt: string | null; createdAt: string }[];
   subscriptions?: (Subscription & { lastEventAt: string | null })[];
   stripeEvents?: { id: string; type: string; receivedAt: string }[];
+  loginLinks?: { tokenHash: string; email: string; next: string; createdAt: string; expiresAt: string; usedAt: string | null }[];
   /** Each board's link secret (boards.link_token in Postgres), kept apart so board objects never carry it. */
   linkSecrets?: Record<string, string>;
 }
@@ -188,6 +189,24 @@ export const localData: DataLayer = {
         user.name = name.trim();
       }
       return user;
+    }),
+
+  createLoginLink: (email, tokenHash, next) =>
+    tx((db) => {
+      const t = Date.now();
+      db.loginLinks = (db.loginLinks ?? []).filter((l) => Date.parse(l.createdAt) > t - 86_400_000);
+      const recent = db.loginLinks.filter((l) => l.email === email && Date.parse(l.createdAt) > t - 3_600_000).length;
+      if (recent >= LOGIN_LINKS_PER_HOUR) return "too_many" as const;
+      db.loginLinks.push({ tokenHash, email, next, createdAt: new Date(t).toISOString(), expiresAt: new Date(t + LOGIN_LINK_MINUTES * 60_000).toISOString(), usedAt: null });
+      return "ok" as const;
+    }),
+
+  useLoginLink: (tokenHash) =>
+    tx((db) => {
+      const link = db.loginLinks?.find((l) => l.tokenHash === tokenHash);
+      if (!link || link.usedAt || Date.parse(link.expiresAt) <= Date.now()) return null;
+      link.usedAt = now();
+      return { email: link.email, next: link.next };
     }),
 
   getUser: (id) => tx((db) => db.users.find((u) => u.id === id) ?? null, false),

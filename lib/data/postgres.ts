@@ -4,7 +4,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { cloneBoardState } from "../board/clone";
-import { AccessError, LINK_SECRET, TRASH_DAYS, canEditBoard, type AppNotification, type Board, type BoardListItem, type BoardRole, type LinkAccess, type DataLayer, type Asset, type Comment, type CommentThread, type Person, type User, type BillingWriter, type Subscription } from "./types";
+import { AccessError, LINK_SECRET, LOGIN_LINK_MINUTES, LOGIN_LINKS_PER_HOUR, TRASH_DAYS, canEditBoard, type AppNotification, type Board, type BoardListItem, type BoardRole, type LinkAccess, type DataLayer, type Asset, type Comment, type CommentThread, type Person, type User, type BillingWriter, type Subscription } from "./types";
 
 type Sql = postgres.Sql;
 type Tx = postgres.TransactionSql;
@@ -72,15 +72,34 @@ const toBoard = (r: BoardRow): Board => ({
 const UUID = /^[0-9a-f-]{36}$/i;
 
 export const postgresData: DataLayer = {
-  // Development sign-in only. With Supabase Auth, accounts are created by Supabase and the trigger makes the profile.
+  // The trigger on auth.users makes the profile and the personal team, and turns waiting invites into memberships.
   async upsertUserByEmail(email, name) {
-    if (process.env.NODE_ENV === "production" && process.env.DEV_SIGN_IN !== "1") throw new Error("Dev sign-in is disabled");
     const key = email.trim().toLowerCase();
     const db = sql();
     const [existing] = await db<{ id: string }[]>`select id from auth.users where email = ${key}`;
     const id = existing?.id ?? (await db<{ id: string }[]>`insert into auth.users (email, raw_user_meta_data) values (${key}, ${db.json({ name: name.trim() })}) returning id`)[0].id;
     if (existing && name.trim()) await asUser(id, (tx) => tx`update profiles set name = ${name.trim()}, updated_at = now() where id = ${id}`);
     return (await postgresData.getUser(id))!;
+  },
+
+  async createLoginLink(email, tokenHash, next) {
+    const db = sql();
+    // Old links are of no use to anyone: tidy them up on the way.
+    await db`delete from login_links where created_at < now() - interval '1 day'`;
+    const rows = await db`
+      insert into login_links (token_hash, email, next, expires_at)
+      select ${tokenHash}, ${email}, ${next}, now() + make_interval(mins => ${LOGIN_LINK_MINUTES})
+      where (select count(*) from login_links where email = ${email} and created_at > now() - interval '1 hour') < ${LOGIN_LINKS_PER_HOUR}
+      returning 1`;
+    return rows.length ? "ok" : "too_many";
+  },
+
+  async useLoginLink(tokenHash) {
+    const [row] = await sql()<{ email: string; next: string }[]>`
+      update login_links set used_at = now()
+       where token_hash = ${tokenHash} and used_at is null and expires_at > now()
+      returning email, next`;
+    return row ?? null;
   },
 
   async getUser(id) {

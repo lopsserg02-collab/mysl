@@ -18,7 +18,7 @@ npm run dev                  # веб на :3000 и сервер совмест�
 По умолчанию данные лежат в `.data/` (JSON и файлы досок). Для Postgres:
 
 ```bash
-# локально: пустая база + заглушка того, что есть в Supabase (роли, auth.users, auth.uid())
+# обычный Postgres: пустая база + роли, auth.users и auth.uid() из db/dev/supabase-stub.sql
 DATABASE_URL=postgres://... npm run db:migrate:dev
 # Supabase: заглушка не нужна
 DATABASE_URL=postgres://... npm run db:migrate
@@ -31,12 +31,7 @@ DATA_LAYER=postgres DATABASE_URL=postgres://... npm run dev
 
 Локально работает тестовый вход: имя и почта, без пароля. В продакшене он выключен (включается только `DEV_SIGN_IN=1`, для стенда).
 
-Вход через Supabase (ссылка на почту и Google) включается сам, когда заданы `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` и `DATA_LAYER=postgres`. В панели Supabase:
-
-- Authentication → URL Configuration: добавьте `https://<ваш сайт>/auth/callback` (и `http://localhost:3000/auth/callback` для разработки) в Redirect URLs;
-- Authentication → Providers → Google: включите и вставьте свой Client ID и Secret из Google Cloud.
-
-Приглашения пока не отправляют писем (Resend подключим позже): человек получает доступ, когда входит с приглашённым адресом, а ссылку на доску владелец отправляет сам.
+Все остальные входят по одноразовой ссылке на почту: Мысль сама создаёт ссылку (таблица `login_links`, хранится только хеш секрета), отправляет её через SMTP (`SMTP_URL`) или Resend и ставит подписанную cookie сессии. Ссылка работает 30 минут и один раз; на один адрес не больше 5 писем в час. Без настроенной почты в разработке ссылка показывается прямо на странице. В продакшене нужен `NEXT_PUBLIC_SITE_URL`: из него собирается адрес в письме.
 
 ## Проверки
 
@@ -52,7 +47,7 @@ npm run build
 - `app/` страницы Next.js: вход, список досок, доска
 - `components/board/` холст на Konva, панели, курсоры
 - `lib/board/` модель доски на Yjs (одна CRDT-документ на доску)
-- `lib/data/` слой данных: локальный JSON для разработки и Postgres/Supabase с row level security
+- `lib/data/` слой данных: локальный JSON для разработки и Postgres с row level security
 - `db/migrations/` схема, права доступа, приглашения, комментарии
 - `server/realtime.ts` сервер Hocuspocus: доступ по токену, только чтение для зрителей
 - `design/` дизайн-токены; цвета только из них
