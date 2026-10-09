@@ -1,0 +1,21 @@
+# The realtime server and Caddy (HTTPS). Secrets live in .env next to this file, written by install.sh.
+services:
+  realtime:
+    build:
+      context: ../..
+      dockerfile: deploy/realtime/Dockerfile
+    env_file: .env
+    restart: unless-stopped
+    mem_limit: 4g
+  caddy:
+    image: caddy:2
+    depends_on: [realtime]
+    ports: ["80:80", "443:443"]
+    environment:
+      MYSL_HOST: ${MYSL_HOST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    restart: unless-stopped
+volumes:
+  caddy_data:

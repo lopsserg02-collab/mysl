@@ -1,0 +1,4 @@
+# HTTPS in front of the realtime server. Caddy gets and renews the certificate for MYSL_HOST by itself.
+{$MYSL_HOST} {
+	reverse_proxy realtime:1234
+}
