@@ -13,6 +13,11 @@ test("Google sign-in hands off to Supabase and returns to /auth/callback", async
     authorize = new URL(route.request().url());
     return route.fulfill({ status: 200, body: "ok" });
   });
+  // Without the consent box ticked nothing leaves the page.
+  await google.click();
+  await expect(page.getByRole("alert").filter({ hasText: "отметьте согласие" })).toBeVisible();
+  expect(authorize).toBeNull();
+  await page.getByRole("checkbox", { name: /согласие на обработку персональных данных/ }).check();
   await google.click();
   await expect.poll(() => authorize?.searchParams.get("provider")).toBe("google");
   const back = new URL(authorize!.searchParams.get("redirect_to")!);

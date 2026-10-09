@@ -100,11 +100,15 @@ test("signed in, / is still the dashboard", async ({ page }) => {
   check();
 });
 
-test("draft legal pages, robots.txt and sitemap.xml", async ({ page, request }) => {
-  for (const [path, title] of [["/terms", "Условия использования"], ["/privacy", "Политика конфиденциальности"]]) {
+test("legal pages before the operator's details are filled in, robots.txt and sitemap.xml", async ({ page, request }) => {
+  for (const [path, title] of [
+    ["/terms", "Пользовательское соглашение"],
+    ["/privacy", "Политика обработки персональных данных"],
+    ["/consent", "Согласие на обработку персональных данных"],
+  ]) {
     await page.goto(path);
     await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
-    await expect(page.getByText("Черновик", { exact: true })).toBeVisible();
+    await expect(page.getByRole("note").filter({ hasText: "ещё не вступил в силу" })).toBeVisible();
     await expect(page.locator('meta[name="robots"]')).toHaveAttribute("content", /noindex/);
     expect(await a11yProblems(page)).toEqual([]);
   }

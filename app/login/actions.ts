@@ -8,7 +8,7 @@ import { devSignInEnabled, supabaseAuthEnabled } from "@/lib/auth-config";
 import { supabaseServer } from "@/lib/supabase/server";
 import { safeNext } from "@/lib/safe-next";
 
-export type LoginState = { error?: "email" | "send" | "off"; sent?: string } | undefined;
+export type LoginState = { error?: "email" | "send" | "off" | "consent"; sent?: string } | undefined;
 
 const devSchema = z.object({
   email: z.string().trim().email().max(200),
@@ -35,6 +35,7 @@ async function callbackUrl(next: string | null) {
 /** Sends a one-time sign-in link. The account is created on first use. */
 export async function sendMagicLink(_prev: LoginState, form: FormData): Promise<LoginState> {
   if (!supabaseAuthEnabled()) return { error: "off" };
+  if (form.get("consent") !== "yes") return { error: "consent" };
   const email = z.string().trim().toLowerCase().email().max(200).safeParse(form.get("email"));
   if (!email.success) return { error: "email" };
   const { error } = await (await supabaseServer()).auth.signInWithOtp({
@@ -47,6 +48,7 @@ export async function sendMagicLink(_prev: LoginState, form: FormData): Promise<
 
 export async function signInWithGoogle(form: FormData) {
   if (!supabaseAuthEnabled()) redirect("/login");
+  if (form.get("consent") !== "yes") redirect("/login?error=consent");
   const { data: res, error } = await (await supabaseServer()).auth.signInWithOAuth({
     provider: "google",
     options: { redirectTo: await callbackUrl(form.get("next") as string | null) },

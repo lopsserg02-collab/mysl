@@ -19,7 +19,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
         <p className="mb-6 mt-1 text-text-muted">{t.login.lead}</p>
         {error && (
           <p role="alert" className="mb-4 text-sm text-danger">
-            {error === "google" ? t.login.errorGoogle : t.login.errorLink}
+            {error === "google" ? t.login.errorGoogle : error === "consent" ? t.login.errorConsent : t.login.errorLink}
           </p>
         )}
         {supabase && <MagicLinkForm next={next} />}
