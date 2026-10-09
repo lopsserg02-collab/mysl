@@ -1,0 +1,11 @@
+# HTTPS for the whole site. Caddy gets and renews the certificate for MYSL_HOST by itself.
+# /rt is the realtime server (live boards, WebSocket); everything else is the web app.
+{$MYSL_HOST} {
+	encode zstd gzip
+	handle_path /rt* {
+		reverse_proxy realtime:1234
+	}
+	handle {
+		reverse_proxy web:3000
+	}
+}

@@ -1,5 +1,5 @@
--- Local development only: the parts of a Supabase database the migrations rely on.
--- A real Supabase project already has all of this.
+-- Plain Postgres (development and the self-hosted server in deploy/server): the parts of a Supabase database the migrations rely on.
+-- Safe to run again: every statement checks first. A real Supabase project already has all of this.
 do $$ begin
   if not exists (select from pg_roles where rolname = 'anon') then create role anon nologin; end if;
   if not exists (select from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;

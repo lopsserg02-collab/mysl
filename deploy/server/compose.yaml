@@ -1,0 +1,86 @@
+# All of Mysl on one machine: database, web app, realtime server, HTTPS, and daily jobs.
+# Secrets live in .env next to this file, written by install.sh. Nothing but Caddy is reachable from outside.
+x-db-url: &db-url postgres://postgres:${DB_PASSWORD}@db:5432/mysl
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: mysl
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "mysl"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../..
+      dockerfile: deploy/server/Dockerfile.web
+      args:
+        NEXT_PUBLIC_SITE_URL: https://${MYSL_HOST}
+        NEXT_PUBLIC_REALTIME_URL: wss://${MYSL_HOST}/rt
+        BUILD_VERSION: ${BUILD_VERSION:-}
+    env_file: .env
+    environment:
+      DATABASE_URL: *db-url
+    volumes:
+      - files:/data
+    depends_on:
+      db: { condition: service_healthy }
+    restart: unless-stopped
+
+  realtime:
+    build:
+      context: ../..
+      dockerfile: deploy/realtime/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: *db-url
+    depends_on:
+      db: { condition: service_healthy }
+    restart: unless-stopped
+    mem_limit: 4g
+
+  caddy:
+    image: caddy:2
+    depends_on: [web, realtime]
+    ports: ["80:80", "443:443"]
+    environment:
+      MYSL_HOST: ${MYSL_HOST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    restart: unless-stopped
+
+  # Once a day, starting 10 minutes after start-up: a database copy into /opt/mysl-backups (the last 14 are kept), and the trash purge.
+  jobs:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: ${DB_PASSWORD}
+      CRON_SECRET: ${CRON_SECRET}
+    volumes:
+      - /opt/mysl-backups:/backups
+    depends_on:
+      db: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 600
+        while true; do
+          f=/backups/mysl-$$(date +%Y-%m-%d).sql.gz
+          pg_dump -h db -U postgres mysl | gzip > "$$f.tmp" && mv "$$f.tmp" "$$f" && echo "backup $$f"
+          ls -1t /backups/mysl-*.sql.gz 2>/dev/null | tail -n +15 | xargs -r rm -f
+          wget -q -O- --header "Authorization: Bearer $$CRON_SECRET" http://web:3000/api/cron/purge || echo "purge failed"
+          echo
+          sleep 86400
+        done
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  files:
+  caddy_data:
