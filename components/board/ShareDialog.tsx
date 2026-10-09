@@ -19,7 +19,8 @@ export function ShareDialog(props: { boardId: string; role: BoardRole; userId: s
   const [guests, setGuests] = useState(props.guestView);
   // The link carries the board's secret: the id alone opens nothing. Fetched when the dialog opens.
   const [secret, setSecret] = useState<string | null>(null);
-  const shareUrl = secret && typeof location !== "undefined" ? `${location.origin}/board/${boardId}?k=${secret}` : "";
+  // The public address when set, so a link copied on a per-build Vercel address still opens for others.
+  const shareUrl = secret && typeof location !== "undefined" ? `${(process.env.NEXT_PUBLIC_SITE_URL || location.origin).replace(/\/+$/, "")}/board/${boardId}?k=${secret}` : "";
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<ShareRole>("editor");
   const [message, setMessage] = useState<{ text: string; error?: boolean; plans?: boolean } | null>(null);
