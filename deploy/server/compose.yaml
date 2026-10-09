@@ -84,3 +84,6 @@ volumes:
   pgdata:
   files:
   caddy_data:
+
+# Docker's default address pools are inside 172.16.0.0/12, which the mysl-route rule (install.sh) keeps
+# off a host VPN. A custom pool outside that range would need the rule changed too.
